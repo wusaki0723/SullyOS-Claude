@@ -1732,70 +1732,188 @@ const LoadingView: React.FC<{ hint?: string }> = ({ hint }) => (
 );
 
 // ============================================================
-// 「珍重」BGM — 随机抽一条循环，全程贯穿，可静音切换
+// 「珍重」BGM — 4 组按 phase 切换，开局各抽一条预加载，crossfade
 // ============================================================
 
+type BGMGroupKey = 'nieren' | 'yangcheng' | 'jieju' | 'letter';
+
 /**
- * 520 BGM URL 池。
- * 在这里填外链/图床/CDN URL（支持 <audio src> 直接加载的 mp3/m4a/ogg/wav）。
- * 进入活动时会从池里随机抽一条 loop 播放。空池时不播放、不报错。
+ * 4 组 BGM URL 池：
+ *   - nieren    捏人界面（char_creator / user_creator）
+ *   - yangcheng 养成界面（loading_a / yangcheng）
+ *   - jieju     结局展示（uncovered_line / ending_screen / loading_b / wake_up / puzzle）
+ *   - letter    读信（letter）
+ * 进入活动时各组随机抽一条预加载，phase 切换时在已抽的 4 条之间 crossfade。
  */
-const LIKE520_BGM_URLS: string[] = [
-    // TODO: 填 BGM 链接
-];
+const LIKE520_BGM_GROUPS: Record<BGMGroupKey, string[]> = {
+    nieren: [
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/nieren/1.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/nieren/2.mp3',
+    ],
+    yangcheng: [
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/1.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/2.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/3.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/4.mp3',
+    ],
+    jieju: [
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/1.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/2.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/3.mp3',
+    ],
+    letter: [
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/1.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/2.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/3.mp3',
+        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/4.mp3',
+    ],
+};
 
 const BGM_MUTED_KEY = 'sullyos_like520_bgm_muted';
 const BGM_TARGET_VOLUME = 0.35;
+const BGM_FADE_MS = 1200;
 
-function useLike520BGM(active: boolean) {
-    const audioRef = useRef<HTMLAudioElement | null>(null);
+const phaseToBGMGroup = (phase: string): BGMGroupKey | null => {
+    switch (phase) {
+        case 'char_creator':
+        case 'user_creator':
+            return 'nieren';
+        case 'loading_a':
+        case 'yangcheng':
+            return 'yangcheng';
+        case 'uncovered_line':
+        case 'ending_screen':
+        case 'loading_b':
+        case 'wake_up':
+        case 'puzzle':
+            return 'jieju';
+        case 'letter':
+            return 'letter';
+        default:
+            return null; // intro / done / error
+    }
+};
+
+function pickRandom<T>(arr: T[]): T | null {
+    if (!arr || arr.length === 0) return null;
+    return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function useLike520BGM(active: boolean, currentGroup: BGMGroupKey | null) {
     const [muted, setMuted] = useState<boolean>(() => {
         try { return localStorage.getItem(BGM_MUTED_KEY) === '1'; } catch { return false; }
     });
 
-    useEffect(() => {
-        if (!active || LIKE520_BGM_URLS.length === 0) return;
-        const url = LIKE520_BGM_URLS[Math.floor(Math.random() * LIKE520_BGM_URLS.length)];
-        const audio = new Audio(url);
-        audio.loop = true;
-        audio.volume = 0;
-        audio.crossOrigin = 'anonymous';
-        audioRef.current = audio;
-        let canceled = false;
-        const p = audio.play();
-        if (p && typeof p.then === 'function') {
-            p.then(() => {
-                if (canceled) return;
-                const target = muted ? 0 : BGM_TARGET_VOLUME;
-                const steps = 12;
-                let i = 0;
-                const fade = setInterval(() => {
-                    i++;
-                    if (canceled || !audioRef.current) { clearInterval(fade); return; }
-                    audioRef.current.volume = Math.min(target, (i / steps) * target);
-                    if (i >= steps) clearInterval(fade);
-                }, 100);
-            }).catch(err => {
-                console.warn('[520][BGM] play failed (likely autoplay policy):', err);
-            });
-        }
-        return () => {
-            canceled = true;
-            try {
-                if (audioRef.current) {
-                    audioRef.current.pause();
-                    audioRef.current.src = '';
-                    audioRef.current = null;
+    const audiosRef = useRef<Partial<Record<BGMGroupKey, HTMLAudioElement>>>({});
+    const fadingRef = useRef<Map<HTMLAudioElement, number>>(new Map());
+    const mutedRef = useRef(muted);
+    mutedRef.current = muted;
+
+    const fade = useCallback((audio: HTMLAudioElement, target: number, durationMs: number = BGM_FADE_MS) => {
+        const prev = fadingRef.current.get(audio);
+        if (prev) { clearInterval(prev); fadingRef.current.delete(audio); }
+        const steps = 12;
+        const intervalMs = durationMs / steps;
+        const startVol = audio.volume;
+        const delta = target - startVol;
+        let i = 0;
+        const timer = window.setInterval(() => {
+            i++;
+            audio.volume = Math.max(0, Math.min(1, startVol + (delta * i / steps)));
+            if (i >= steps) {
+                clearInterval(timer);
+                fadingRef.current.delete(audio);
+                if (target === 0 && !audio.paused) {
+                    audio.pause();
                 }
-            } catch { /* ignore */ }
+            }
+        }, intervalMs);
+        fadingRef.current.set(audio, timer);
+    }, []);
+
+    // 初始化：active 第一次为 true 时，各组随机抽一条 + 预加载
+    useEffect(() => {
+        if (!active) return;
+        if (Object.keys(audiosRef.current).length > 0) return; // 已初始化
+
+        console.log('[520][BGM] 各组随机抽样 + 预加载');
+        (Object.keys(LIKE520_BGM_GROUPS) as BGMGroupKey[]).forEach(key => {
+            const url = pickRandom(LIKE520_BGM_GROUPS[key]);
+            if (!url) return;
+            try {
+                const audio = new Audio();
+                audio.loop = true;
+                audio.volume = 0;
+                audio.preload = 'auto';
+                audio.crossOrigin = 'anonymous';
+                audio.src = url;
+                audio.load();
+                audiosRef.current[key] = audio;
+                console.log(`[520][BGM] ${key} → ${url}`);
+            } catch (err) {
+                console.warn(`[520][BGM] failed to init ${key}:`, err);
+            }
+        });
+
+        return () => {
+            // active 切回 false 或 session 卸载：停掉全部
+            fadingRef.current.forEach(t => clearInterval(t));
+            fadingRef.current.clear();
+            Object.values(audiosRef.current).forEach(audio => {
+                if (audio) {
+                    try {
+                        audio.pause();
+                        audio.src = '';
+                    } catch { /* ignore */ }
+                }
+            });
+            audiosRef.current = {};
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [active]);
 
+    // currentGroup 切换：当前组淡入，其他组淡出
     useEffect(() => {
-        if (audioRef.current) audioRef.current.volume = muted ? 0 : BGM_TARGET_VOLUME;
+        if (!active) return;
+        const targetVol = mutedRef.current ? 0 : BGM_TARGET_VOLUME;
+        (Object.keys(audiosRef.current) as BGMGroupKey[]).forEach(key => {
+            const audio = audiosRef.current[key];
+            if (!audio) return;
+            if (key === currentGroup) {
+                if (audio.paused) {
+                    audio.play().then(() => {
+                        fade(audio, targetVol);
+                    }).catch(err => {
+                        console.warn(`[520][BGM] play ${key} failed (autoplay?):`, err);
+                    });
+                } else {
+                    fade(audio, targetVol);
+                }
+            } else {
+                if (!audio.paused) fade(audio, 0);
+            }
+        });
+    }, [currentGroup, active, fade]);
+
+    // muted 切换：实时调当前组音量
+    useEffect(() => {
         try { localStorage.setItem(BGM_MUTED_KEY, muted ? '1' : '0'); } catch { /* ignore */ }
-    }, [muted]);
+        if (!active) return;
+        (Object.keys(audiosRef.current) as BGMGroupKey[]).forEach(key => {
+            const audio = audiosRef.current[key];
+            if (!audio) return;
+            if (key === currentGroup) {
+                const target = muted ? 0 : BGM_TARGET_VOLUME;
+                if (muted) {
+                    fade(audio, 0, 500);
+                } else {
+                    if (audio.paused) {
+                        audio.play().catch(() => { /* ignore */ });
+                    }
+                    fade(audio, target, 500);
+                }
+            }
+        });
+    }, [muted, active, currentGroup, fade]);
 
     const toggleMute = useCallback(() => setMuted(m => !m), []);
     return { muted, toggleMute };
@@ -1803,9 +1921,11 @@ function useLike520BGM(active: boolean) {
 
 const BGMContext = React.createContext<{ muted: boolean; toggleMute: () => void } | null>(null);
 
+const HAS_BGM = Object.values(LIKE520_BGM_GROUPS).some(arr => arr && arr.length > 0);
+
 const BGMToggle: React.FC = () => {
     const ctx = React.useContext(BGMContext);
-    if (!ctx || LIKE520_BGM_URLS.length === 0) return null;
+    if (!ctx || !HAS_BGM) return null;
     const { muted, toggleMute } = ctx;
     return (
         <button
@@ -1850,8 +1970,10 @@ export const Like520Session: React.FC<SessionProps> = ({ charId, onClose }) => {
     const [phase, setPhase] = useState<Phase>('intro');
     const [errorMsg, setErrorMsg] = useState<string>('');
 
-    // BGM 在 intro 之后启动（用户已点击进入 → 满足 autoplay policy）
-    const bgm = useLike520BGM(phase !== 'intro' && phase !== 'error');
+    // BGM：根据当前 phase 切换 4 组 BGM。intro 阶段不启动（等用户点击进入再开始，避开 autoplay policy）
+    const bgmActive = phase !== 'intro' && phase !== 'error';
+    const bgmGroup = phaseToBGMGroup(phase);
+    const bgm = useLike520BGM(bgmActive, bgmGroup);
 
     const [charChibi, setCharChibi] = useState<ChibiResult | null>(null);
     const [userChibi, setUserChibi] = useState<ChibiResult | null>(null);
