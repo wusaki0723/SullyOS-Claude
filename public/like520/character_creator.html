@@ -568,7 +568,9 @@ function applyLike520Init(init) {
       ? '诶？连你也……'
       : `如果 ${LIKE520_CHAR_NAME || 'ta'} 变得小小的，那ta会是——`;
   }
-  if (init.presets && typeof init.presets === 'object') {
+  // 先看有没有上次的草稿；有就恢复，没就走 presets
+  const draftLoaded = tryLoadDraft();
+  if (!draftLoaded && init.presets && typeof init.presets === 'object') {
     Object.entries(init.presets).forEach(([key, itemId]) => {
       if (state.selected.hasOwnProperty(key)) {
         if (Array.isArray(state.selected[key])) {
@@ -582,6 +584,7 @@ function applyLike520Init(init) {
   // 任何 init 都强制重渲（isSully 变化会影响 special 项过滤）
   if (typeof renderPanel === 'function') renderPanel();
   if (typeof renderCharacter === 'function') renderCharacter();
+  if (draftLoaded) toast('已恢复上次的草稿 ✦');
 }
 
 if (IS_EMBEDDED) {
@@ -1922,9 +1925,10 @@ document.getElementById("btnReset").onclick = () => {
   });
   state.flipped = {};
   state.activeItemFocus = {};
+  clearDraft();
   renderPanel();
   renderCharacter();
-  toast("已清空，重新开始 ♥");
+  toast("已清空，草稿也清掉 ♥");
 };
 
 document.getElementById("btnSave").onclick = async () => {
@@ -2031,6 +2035,65 @@ function setExportMode(mode) {
 function closeModal() {
   document.getElementById("modal").classList.remove("show");
 }
+
+/* === 草稿自动保存 / 复用 ===
+   key: mode + charName，让每个角色 + 是否是 user 各自存一份
+   存的只是 state（小 JSON），不存图片 PNG */
+function getDraftKey() {
+  return `like520_cc_draft_${LIKE520_MODE}_${LIKE520_CHAR_NAME || 'default'}`;
+}
+let saveDraftTimer = null;
+function saveDraft() {
+  if (!IS_EMBEDDED) return;
+  if (saveDraftTimer) clearTimeout(saveDraftTimer);
+  saveDraftTimer = setTimeout(() => {
+    try {
+      const payload = {
+        selected: state.selected,
+        tintColor: state.tintColor,
+        itemColor: state.itemColor,
+        flipped: state.flipped,
+        eyeSide: state.eyeSide,
+        hairLinked: state.hairLinked,
+        activeItemFocus: state.activeItemFocus,
+        preserveLineart: state.preserveLineart,
+      };
+      localStorage.setItem(getDraftKey(), JSON.stringify(payload));
+    } catch (e) { console.warn('[520][cc] save draft failed', e); }
+  }, 600);
+}
+function tryLoadDraft() {
+  if (!IS_EMBEDDED) return false;
+  try {
+    const raw = localStorage.getItem(getDraftKey());
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || typeof d !== 'object') return false;
+    if (d.selected) state.selected = d.selected;
+    if (d.tintColor) state.tintColor = d.tintColor;
+    if (d.itemColor) state.itemColor = d.itemColor;
+    if (d.flipped) state.flipped = d.flipped;
+    if (d.eyeSide) state.eyeSide = d.eyeSide;
+    if (d.hairLinked) state.hairLinked = d.hairLinked;
+    if (d.activeItemFocus) state.activeItemFocus = d.activeItemFocus;
+    if (typeof d.preserveLineart === 'number') state.preserveLineart = d.preserveLineart;
+    console.log('[520][cc] 恢复上次草稿');
+    return true;
+  } catch (e) {
+    console.warn('[520][cc] load draft failed', e);
+    return false;
+  }
+}
+function clearDraft() {
+  try { localStorage.removeItem(getDraftKey()); } catch {}
+}
+/* 把所有会改 state 的入口都钩一下：renderPanel / renderColorPicker / renderFlipButton 后的 onclick 改完 state 后调 saveDraft */
+/* 简化策略：把 renderCharacter 当作"state 已稳定"的信号，每次重渲都顺手存一次 */
+const _origRenderCharacter = renderCharacter;
+renderCharacter = function() {
+  _origRenderCharacter.apply(this, arguments);
+  saveDraft();
+};
 
 renderTabs();
 renderPanel();

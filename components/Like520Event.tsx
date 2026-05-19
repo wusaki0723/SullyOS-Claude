@@ -1167,7 +1167,7 @@ const Y520Scene: React.FC<Y520SceneProps> = ({ callA, charName, charAvatar, char
     const spawnParticles = (x: number, y: number, count: number) => {
         const fx = fxRef.current;
         if (!fx) return;
-        const glyphs = ['✦', '✧', '⋆', '❀', '❦', '·'];
+        const glyphs = ['♡', '♥', '✦', '✧', '❀', '❦', '·'];
         for (let i = 0; i < count; i++) {
             const el = document.createElement('div');
             el.className = 'l520-particle';

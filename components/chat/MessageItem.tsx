@@ -431,6 +431,32 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
                 }}>
                     ❦ 点 开 看 信 ❦
                 </div>
+
+                {/* 左下角复古火漆/印章："♥ 520" */}
+                <div style={{
+                    position: 'absolute',
+                    bottom: -8, left: -8,
+                    width: 44, height: 44,
+                    borderRadius: '50%',
+                    background: 'radial-gradient(circle at 35% 35%, #d4516a 0%, #a04050 50%, #7a2e3a 100%)',
+                    color: '#fff8ec',
+                    display: 'grid', placeItems: 'center',
+                    fontFamily: '"Cormorant Garamond", serif',
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: 0,
+                    lineHeight: 1.1,
+                    transform: 'rotate(-12deg)',
+                    boxShadow: '0 3px 8px rgba(74,36,24,0.4), inset 0 2px 2px rgba(255,255,255,0.18), inset 0 -2px 2px rgba(0,0,0,0.25)',
+                    border: '1px solid rgba(212,177,106,0.5)',
+                    textAlign: 'center',
+                    pointerEvents: 'none',
+                }}>
+                    <div>
+                        <div style={{ fontSize: 14, lineHeight: 1, fontFamily: 'serif' }}>♥</div>
+                        <div style={{ fontSize: 7, letterSpacing: 1, marginTop: 1, fontFamily: 'Cinzel, serif' }}>5·20</div>
+                    </div>
+                </div>
             </div>
 
             {open && (
