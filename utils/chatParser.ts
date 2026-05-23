@@ -269,10 +269,15 @@ export const ChatParser = {
 
         // 2. For each chunk, also split on spaces between CJK chars/punctuation
         //    (中文里不该有空格, so "汉字 汉字" means the AI intended a bubble break)
+        //    括号内的空格要保护: 否则裸括号表情包 / 标签 (如 "[你 交给我吧]" 或
+        //    "[[SEND_EMOJI: a b]]") 会被这条规则劈成 "[你" + "交给我吧]" 掉格式.
+        //    做法: 先把 [...] / [[...]] 内空格换成占位符, split 后再换回.
+        const SENTINEL = String.fromCharCode(0);
         const result: string[] = [];
         for (const chunk of lineChunks) {
-            const sub = chunk.split(cjkSpaceRe)
-                .map(c => c.trim())
+            const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, m => m.replace(/\s/g, SENTINEL));
+            const sub = guarded.split(cjkSpaceRe)
+                .map(c => c.split(SENTINEL).join(' ').trim())
                 .filter(c => c.length > 0);
             result.push(...sub);
         }

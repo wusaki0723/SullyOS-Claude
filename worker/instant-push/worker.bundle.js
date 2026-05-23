@@ -1931,9 +1931,11 @@ function chunkText(text) {
   const CJK = "\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef\\u2000-\\u206f\\u2e80-\\u2eff\\u3001-\\u3003\\u2018-\\u201f\\u300a-\\u300f\\uff01-\\uff0f\\uff1a-\\uff20";
   const cjkSpaceRe = new RegExp(`(?<=[${CJK}])\\s+(?=[${CJK}])`);
   const lineChunks = text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/).map((c) => c.trim()).filter((c) => c.length > 0);
+  const SENTINEL = String.fromCharCode(0);
   const out = [];
   for (const chunk of lineChunks) {
-    const sub = chunk.split(cjkSpaceRe).map((c) => c.trim()).filter((c) => c.length > 0);
+    const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, (m) => m.replace(/\s/g, SENTINEL));
+    const sub = guarded.split(cjkSpaceRe).map((c) => c.split(SENTINEL).join(" ").trim()).filter((c) => c.length > 0);
     out.push(...sub);
   }
   return out;

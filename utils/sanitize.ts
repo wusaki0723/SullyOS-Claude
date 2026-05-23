@@ -326,10 +326,15 @@ function chunkText(text: string): string[] {
     .map((c) => c.trim())
     .filter((c) => c.length > 0);
 
+  // \u62ec\u53f7\u5185\u7684\u7a7a\u683c\u8981\u4fdd\u62a4: \u5426\u5219\u88f8\u62ec\u53f7\u8868\u60c5\u5305 / \u6807\u7b7e (\u5982 "[\u4f60 \u4ea4\u7ed9\u6211\u5427]" \u6216 "[[SEND_EMOJI: a b]]")
+  // \u4f1a\u88ab CJK-\u7a7a\u683c\u65ad\u884c\u89c4\u5219\u5288\u6210 "[\u4f60" + "\u4ea4\u7ed9\u6211\u5427]" \u6389\u683c\u5f0f. \u5148\u628a [...] / [[...]] \u5185\u7a7a\u683c\u6362\u6210
+  // \u5360\u4f4d\u7b26, split \u540e\u518d\u6362\u56de. \u8ddf chatParser.chunkText \u540c\u4e00\u4efd\u903b\u8f91, \u4fdd\u6301\u5b57\u8282\u5bf9\u9f50.
+  const SENTINEL = String.fromCharCode(0);
   const out: string[] = [];
   for (const chunk of lineChunks) {
-    const sub = chunk.split(cjkSpaceRe)
-      .map((c) => c.trim())
+    const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, (m) => m.replace(/\s/g, SENTINEL));
+    const sub = guarded.split(cjkSpaceRe)
+      .map((c) => c.split(SENTINEL).join(' ').trim())
       .filter((c) => c.length > 0);
     out.push(...sub);
   }
