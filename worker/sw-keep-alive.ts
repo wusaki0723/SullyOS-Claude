@@ -408,39 +408,6 @@ async function saveEmotionUpdateToInbox(payload: any) {
   await notifyClients({ type: 'active-msg-received', charId, charName: payload?.contactName || '', body: '', emotionUpdate: true });
 }
 
-// content push: 没有可见 client 时 (后台 / PWA 被关 / 移动端冻结) 补一条系统通知, 否则用户
-// 无从得知回复已到, 不会回前台 → inbox 不 flush → 客户端副作用 (写 Notion / 飞书日记等
-// directive) 永远跑不了. 与 notifyVisibleClientForToolRequest 同策略: 有可见 client 就交给
-// in-app UI (前台 toast), 不弹系统通知 (避开 iOS 前台双弹).
-//
-// 去重: web 端 active-msg 的系统通知唯一来源就是这里 — 主线程 OSContext active-msg handler
-// 只在可见时弹 in-app toast, 它调的 sendProactiveNativeNotification 是 Capacitor-only (web no-op),
-// 所以前台 toast / 后台系统通知互斥不重叠. 见 OSContext 注释 "SW push handler 已经 fire 过系统通知".
-//
-// per-char tag → 同一角色一个 turn 的多条 chunk 通知互相替换, 只露最新一条预览, 不刷屏.
-async function notifyClosedClientForContent(payload: any) {
-  const preview = String(payload?.message || payload?.body || '').replace(/\s+/g, ' ').trim();
-  // directive-only / 空 body push 不弹 (正文 chunk 已经弹过, 别用空预览把它替换掉).
-  if (!preview) return;
-
-  const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const visibleClient = clients.find((c) => (c as WindowClient).visibilityState === 'visible');
-  if (visibleClient) return;
-
-  const charName = payload?.contactName || payload?.metadata?.charName || '主动消息';
-  const charId = payload?.metadata?.charId || '';
-  try {
-    await sw.registration.showNotification(charName, {
-      body: preview.slice(0, 120),
-      icon: payload?.avatarUrl || './icons/icon-192.png',
-      badge: './icons/icon-192.png',
-      data: { payload, kind: 'content' },
-      tag: `active-msg-${charId}`,
-    });
-  } catch (e) {
-    console.warn('[amsg] content notification failed', e);
-  }
-}
 
 // ─── _blob envelope (fetch real body, recurse) ───────────────────────────────
 
@@ -477,7 +444,6 @@ async function saveIncomingActiveMessage(payload: any) {
   switch (messageKind) {
     case 'content':
       await saveContentToInbox(payload);
-      await notifyClosedClientForContent(payload);
       return;
 
     case 'reasoning':
