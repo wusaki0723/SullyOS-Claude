@@ -1224,6 +1224,8 @@ export interface DiaryEntry {
     charPage?: DiaryPage;
     timestamp: number;
     isArchived: boolean;
+    /** 角色回复了的日记自动发到聊天后, 记录那条 score_card 消息的 id, 用于后续 edit/delete 同步 */
+    chatCardMessageId?: number;
 }
 
 // ─── HANDBOOK / 手账 (跨角色聚合·零负担留痕本) ───

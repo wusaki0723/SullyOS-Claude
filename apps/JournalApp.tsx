@@ -2,13 +2,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, DiaryEntry, StickerData, DiaryPage } from '../types';
+import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
 import { safeResponseJson } from '../utils/safeApi';
-import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
-import { Sparkle } from '@phosphor-icons/react';
+import { injectMemoryPalace, ingestDiaryToPalace } from '../utils/memoryPalace/pipeline';
+import { Sparkle, Archive } from '@phosphor-icons/react';
+
+const INTRO_SEEN_KEY = 'journal_app_intro_seen_v2';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -41,17 +43,26 @@ const getLocalDateStr = () => {
 };
 
 const JournalApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile } = useOS();
-    
+    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig } = useOS();
+
     const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
     const [diaries, setDiaries] = useState<DiaryEntry[]>([]);
     const [currentEntry, setCurrentEntry] = useState<DiaryEntry | null>(null);
     const [selectedDate, setSelectedDate] = useState<string>(getLocalDateStr());
-    
+
+    // Onboarding popup (一次性)
+    const [showIntro, setShowIntro] = useState<boolean>(() => {
+        try { return !localStorage.getItem(INTRO_SEEN_KEY); } catch { return false; }
+    });
+    const dismissIntro = () => {
+        try { localStorage.setItem(INTRO_SEEN_KEY, '1'); } catch {}
+        setShowIntro(false);
+    };
+
     // Editor State
     const [isThinking, setIsThinking] = useState(false);
-    const [isSending, setIsSending] = useState(false);
+    const [archivingId, setArchivingId] = useState<string | null>(null);
     const [showStickerPanel, setShowStickerPanel] = useState(false);
     const [activeTab, setActiveTab] = useState<'user' | 'char'>('user'); // View Tab
     const [hideCharStickers, setHideCharStickers] = useState(false); // Toggle to hide char stickers
@@ -186,15 +197,79 @@ const JournalApp: React.FC = () => {
         }
     };
 
+    // 把一条 diary 序列化成 score_card payload（含纸张样式名等卡片显示需要的字段）
+    const buildDiaryCardPayload = (entry: DiaryEntry, char: CharacterProfile) => {
+        const userPaperName = PAPER_STYLES.find(p => p.id === entry.userPage.paperStyle)?.name || '白纸';
+        const charPaperName = entry.charPage
+            ? (PAPER_STYLES.find(p => p.id === entry.charPage!.paperStyle)?.name || '白纸')
+            : '';
+        return {
+            type: 'diary_card',
+            date: entry.date,
+            charName: char.name,
+            charAvatar: char.avatar || '',
+            userName: userProfile.name,
+            userText: entry.userPage.text,
+            charText: entry.charPage?.text || '',
+            userPaperStyle: entry.userPage.paperStyle,
+            userPaperName,
+            charPaperStyle: entry.charPage?.paperStyle || '',
+            charPaperName,
+            userStickerCount: entry.userPage.stickers?.length || 0,
+            charStickerCount: entry.charPage?.stickers?.length || 0,
+        };
+    };
+
+    // 把一条已有 charPage 的日记同步到聊天里（新建或更新 score_card）。
+    // 没有 charPage → 不做任何事（单方面写的日记不进上下文，这是产品规则）。
+    // 返回最终带 chatCardMessageId 的 entry，供调用方接着 setCurrentEntry/saveDiary。
+    const syncDiaryCardToChat = async (entry: DiaryEntry, char: CharacterProfile): Promise<DiaryEntry> => {
+        if (!entry.charPage) return entry;
+        const cardData = buildDiaryCardPayload(entry, char);
+
+        if (entry.chatCardMessageId) {
+            try {
+                await DB.updateMessage(entry.chatCardMessageId, JSON.stringify(cardData));
+                await DB.updateMessageMetadata(entry.chatCardMessageId, prev => ({
+                    ...(prev || {}),
+                    scoreCard: cardData,
+                    source: 'journal-exchange',
+                }));
+                return entry;
+            } catch (e) {
+                console.warn('🗒 [Journal] 已存在的卡片更新失败, 重新创建:', e);
+            }
+        }
+        const newId = await DB.saveMessage({
+            charId: char.id,
+            role: 'system',
+            type: 'score_card',
+            content: JSON.stringify(cardData),
+            metadata: { scoreCard: cardData, source: 'journal-exchange' },
+        });
+        return { ...entry, chatCardMessageId: newId };
+    };
+
     const saveEntry = async () => {
-        if (!currentEntry) return;
-        await DB.saveDiary(currentEntry);
-        await loadDiaries(currentEntry.charId);
+        if (!currentEntry || !selectedChar) return;
+        // 若该日记已经在聊天里有卡片（char 回复过 + 自动发送过），保存时同步更新卡片
+        let toSave = currentEntry;
+        if (currentEntry.chatCardMessageId && currentEntry.charPage) {
+            toSave = await syncDiaryCardToChat(currentEntry, selectedChar);
+        }
+        await DB.saveDiary(toSave);
+        if (toSave !== currentEntry) setCurrentEntry(toSave);
+        await loadDiaries(toSave.charId);
         addToast('日记已保存', 'success');
     };
 
     const handleDeleteDiary = async () => {
         if (!deletingDiary || !selectedChar) return;
+        // 同步删除聊天里的卡片（如果之前发过）
+        if (deletingDiary.chatCardMessageId) {
+            try { await DB.deleteMessage(deletingDiary.chatCardMessageId); }
+            catch (e) { console.warn('🗒 [Journal] 卡片删除失败 (可能已不存在):', e); }
+        }
         await DB.deleteDiary(deletingDiary.id);
         await loadDiaries(selectedChar.id);
         setDeletingDiary(null);
@@ -402,11 +477,14 @@ Structure:
             };
 
             const updatedEntry = { ...currentEntry, charPage };
-            setCurrentEntry(updatedEntry);
-            await DB.saveDiary(updatedEntry);
+            // 自动发送 / 同步到聊天：char 有回复 → 卡片落地到对应角色的聊天历史。
+            // 重交换（同一日记重新让 char 写回复）会复用已有 chatCardMessageId 走更新而不是再创建一条。
+            const synced = await syncDiaryCardToChat(updatedEntry, selectedChar);
+            setCurrentEntry(synced);
+            await DB.saveDiary(synced);
             await loadDiaries(selectedChar.id);
             setActiveTab('char');
-            addToast('对方已回复', 'success');
+            addToast('对方已回复 · 已同步到聊天', 'success');
 
         } catch (e: any) {
             addToast(`回复失败: ${e.message}`, 'error');
@@ -415,50 +493,115 @@ Structure:
         }
     };
 
-    const handleSendToChat = async () => {
-        if (!currentEntry || !selectedChar || !currentEntry.charPage || currentEntry.isArchived) return;
+    // 手动归档: 把一条日记总结成神经链接条目 (char.memories) +
+    // 如果该角色开启了记忆宫殿,再用宫殿副 API 抽取结构化记忆节点并向量化入宫。
+    // 跟 chatapp 的归档逻辑对齐: 没开宫殿就是老路径只是 prompt 更详细;
+    // 开了宫殿就用 extractMemoriesFromBuffer + vectorizeAndStore (lightLLM 副 API)。
+    const handleArchiveDiary = async (diary: DiaryEntry) => {
+        if (!selectedChar || diary.isArchived) return;
+        if (!apiConfig.apiKey) { addToast('请先配置主 API', 'error'); return; }
+        if (!diary.userPage.text.trim() && !diary.charPage?.text?.trim()) {
+            addToast('日记内容为空,无法归档', 'info');
+            return;
+        }
 
-        setIsSending(true);
+        setArchivingId(diary.id);
 
         try {
-            const userPaperName = PAPER_STYLES.find(p => p.id === currentEntry.userPage.paperStyle)?.name || '白纸';
-            const charPaperName = PAPER_STYLES.find(p => p.id === currentEntry.charPage.paperStyle)?.name || '白纸';
+            // 1. 主 API: 生成更详细的归档总结 (老路径的升级版,文字更长更具体)
+            const baseContext = ContextBuilder.buildCoreContext(selectedChar, userProfile);
+            const charPart = diary.charPage?.text?.trim() || '(对方没有回复)';
+            const prompt = `${baseContext}
 
-            const cardData = {
-                type: 'diary_card',
-                date: currentEntry.date,
-                charName: selectedChar.name,
-                charAvatar: selectedChar.avatar || '',
-                userName: userProfile.name,
-                userText: currentEntry.userPage.text,
-                charText: currentEntry.charPage.text,
-                userPaperStyle: currentEntry.userPage.paperStyle,
-                userPaperName,
-                charPaperStyle: currentEntry.charPage.paperStyle,
-                charPaperName,
-                userStickerCount: currentEntry.userPage.stickers?.length || 0,
-                charStickerCount: currentEntry.charPage.stickers?.length || 0,
+### [系统指令: 交换日记归档]
+当前任务: 把这篇【交换日记】(日期 ${diary.date}) 总结成一段对你 (${selectedChar.name}) 长期有效的记忆。
+
+### 输入内容
+${userProfile.name} 的那页:
+"""
+${diary.userPage.text || '(空白页)'}
+"""
+
+你 (${selectedChar.name}) 的回复页:
+"""
+${charPart}
+"""
+
+### 输出要求
+1. **第一人称**: 全程用"我"称呼自己,用"${userProfile.name}"称呼对方,不要写成第三视角叙述。
+2. **要点齐全**: 至少覆盖以下信息 (有就写,没有就跳过,不要生造):
+   - ${userProfile.name} 那天的关键事件 / 心情 / 提到的人或物
+   - 我对这些内容的反应、共鸣、或心里没说出口的想法
+   - 我在自己那页里分享的、属于我自己的事
+   - 如果出现任何承诺、约定、未解决的疑问,都要点名记录下来 (这些以后可能要兑现)
+3. **细节胜过抽象**: 多说具体的事 (人名、地点、物件、当时的情绪),少用"我们度过了美好的一天"这种空话。
+4. **篇幅**: 150~300 字之间的一段中文叙述,不要分段,不要列表,不要任何前缀和标题,直接出叙述。
+`;
+
+            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
+                body: JSON.stringify({
+                    model: apiConfig.model,
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.4,
+                    max_tokens: 1200,
+                }),
+            });
+            if (!response.ok) throw new Error(`主 API 失败 (${response.status})`);
+            const data = await safeResponseJson(response);
+            let summary = (data.choices?.[0]?.message?.content || '').trim();
+            summary = summary.replace(/^["'「『]|["'」』]$/g, '').trim();
+            if (!summary) throw new Error('归档总结为空');
+
+            // 2. 神经链接 (char.memories): 永远写入,日期对齐到日记当天
+            const newMem: MemoryFragment = {
+                id: `mem-diary-${Date.now()}`,
+                date: diary.date,
+                summary,
+                mood: 'diary',
             };
-
-            await DB.saveMessage({
-                charId: selectedChar.id,
-                role: 'system',
-                type: 'score_card',
-                content: JSON.stringify(cardData),
-                metadata: { scoreCard: cardData, source: 'journal-exchange' },
+            updateCharacter(selectedChar.id, {
+                memories: [...(selectedChar.memories || []), newMem],
             });
 
-            const updatedDiary = { ...currentEntry, isArchived: true };
-            setCurrentEntry(updatedDiary);
+            // 3. 记忆宫殿 (开了才走): 用副 API 抽结构化节点 + 向量化,createdAt = 日记当天
+            let palaceMsg = '';
+            if (selectedChar.memoryPalaceEnabled) {
+                try {
+                    const result = await ingestDiaryToPalace(
+                        selectedChar,
+                        diary.date,
+                        diary.userPage.text,
+                        diary.charPage?.text || '',
+                        memoryPalaceConfig?.lightLLM as any,
+                        userProfile.name,
+                    );
+                    if (result && result.stored > 0) {
+                        palaceMsg = ` · 宫殿入${result.stored}条`;
+                    } else if (result && result.nodesExtracted > 0) {
+                        palaceMsg = ` · 宫殿命中去重`;
+                    } else if (result == null) {
+                        palaceMsg = ` · 宫殿副API未配置`;
+                    }
+                } catch (e: any) {
+                    console.warn('🏰 [Journal] 入宫失败:', e);
+                    palaceMsg = ` · 宫殿写入失败`;
+                }
+            }
+
+            // 4. 标记 isArchived 防止重复
+            const updatedDiary: DiaryEntry = { ...diary, isArchived: true };
             await DB.saveDiary(updatedDiary);
+            if (currentEntry?.id === diary.id) setCurrentEntry(updatedDiary);
             await loadDiaries(selectedChar.id);
 
-            addToast('已发送到聊天', 'success');
+            addToast(`已归档至神经链接${palaceMsg}`, 'success');
         } catch (e: any) {
             console.error(e);
-            addToast(`发送失败: ${e.message}`, 'error');
+            addToast(`归档失败: ${e.message}`, 'error');
         } finally {
-            setIsSending(false);
+            setArchivingId(null);
         }
     };
 
@@ -549,9 +692,34 @@ Structure:
         );
     };
 
+    // 一次性弹窗:讲清楚新版交换日记的行为变化(自动同步 / 归档移到列表 / 宫殿入向量)
+    const introModal = showIntro ? (
+        <Modal
+            isOpen={showIntro}
+            title="交换日记 · 更新了"
+            onClose={dismissIntro}
+            footer={
+                <button onClick={dismissIntro} className="w-full py-3 bg-amber-500 text-white font-bold rounded-2xl active:scale-95 transition-transform">
+                    我知道了
+                </button>
+            }
+        >
+            <div className="space-y-3 text-sm text-slate-700 leading-relaxed">
+                <p className="font-bold text-amber-700">几个新变化,先看一眼:</p>
+                <div className="rounded-2xl bg-amber-50 border border-amber-100 px-4 py-3 space-y-2">
+                    <p><span className="font-bold text-amber-700">① 自动同步聊天:</span> 角色回复了你的日记之后,会自动变成一张漂亮卡片出现在和这个角色的聊天里 —— 不用再手动发送。你之后在日记本里改文字 / 删日记,聊天里那张卡片也会跟着同步。</p>
+                    <p><span className="font-bold text-amber-700">② 单向日记不进上下文:</span> 如果你只是单方面写给角色看(没让 ta 回复),这一篇就不会进入任何记忆,按以前的方式存着就好。</p>
+                    <p><span className="font-bold text-amber-700">③ 归档按钮搬家了:</span> 顶部的"归档"按钮没了,改成每条日记右边的小档案盒图标。点一下会把那篇日记总结进角色的<b>神经链接</b>;如果角色开了<b>记忆宫殿</b>,也会用宫殿的副 API 抽出结构化记忆塞进向量库(日期对齐到日记当天)。</p>
+                </div>
+                <p className="text-xs text-slate-400">这条提示只出现一次。</p>
+            </div>
+        </Modal>
+    ) : null;
+
     if (mode === 'select') {
         return (
             <div className="h-full w-full bg-amber-50 flex flex-col font-light">
+                {introModal}
                 <div className="pt-12 pb-4 px-6 border-b border-amber-100 bg-amber-50/80 backdrop-blur-sm sticky top-0 z-20 flex items-center justify-between shrink-0 h-24 box-border">
                     <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-amber-900"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
@@ -579,6 +747,7 @@ Structure:
     if (mode === 'calendar' && selectedChar) {
         return (
             <div className="h-full w-full bg-white flex flex-col font-light relative">
+                {introModal}
                 <div className="pt-12 pb-6 px-6 bg-amber-500 shadow-lg shrink-0 rounded-b-[2rem] z-20">
                     <div className="flex justify-between items-start mb-4">
                          <button onClick={() => setMode('select')} className="text-white/80 hover:text-white transition-colors">
@@ -611,10 +780,35 @@ Structure:
                                         <p className="text-xs text-slate-400 font-mono">{d.date.split('-')[0]}</p>
                                         <div className="flex gap-2">
                                             {d.charPage && <span className="px-2 py-0.5 bg-green-100 text-green-600 rounded-full text-[9px] font-bold">已回复</span>}
-                                            {d.isArchived && <span className="px-2 py-0.5 bg-amber-100 text-amber-600 rounded-full text-[9px] font-bold">已发送</span>}
+                                            {d.chatCardMessageId && <span className="px-2 py-0.5 bg-emerald-50 text-emerald-500 rounded-full text-[9px] font-bold">同步聊天</span>}
+                                            {d.isArchived && <span className="px-2 py-0.5 bg-amber-100 text-amber-600 rounded-full text-[9px] font-bold">已归档</span>}
                                         </div>
                                     </div>
                                 </div>
+                                {/* 归档按钮:已归档→显示状态,未归档→点击归档(支持单方面写的日记) */}
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (d.isArchived || archivingId) return;
+                                        handleArchiveDiary(d);
+                                    }}
+                                    disabled={d.isArchived || archivingId === d.id}
+                                    className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                                        d.isArchived
+                                            ? 'text-amber-500 bg-amber-50 cursor-default'
+                                            : archivingId === d.id
+                                                ? 'text-amber-500 bg-amber-50 cursor-wait'
+                                                : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                                    }`}
+                                    title={d.isArchived ? '已归档进神经链接' : (archivingId === d.id ? '归档中...' : '归档进神经链接' + (selectedChar.memoryPalaceEnabled ? ' / 记忆宫殿' : ''))}
+                                    aria-label="归档日记"
+                                >
+                                    {archivingId === d.id ? (
+                                        <div className="w-3.5 h-3.5 border-2 border-amber-200 border-t-amber-500 rounded-full animate-spin"></div>
+                                    ) : (
+                                        <Archive size={16} weight={d.isArchived ? 'fill' : 'regular'} />
+                                    )}
+                                </button>
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();
@@ -655,7 +849,8 @@ Structure:
     // --- WRITE MODE ---
     return (
         <div className="h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden">
-            
+            {introModal}
+
             {/* Editor Header */}
             <div className="pt-12 pb-3 px-4 bg-[#1a1a1a]/90 backdrop-blur-md flex items-center justify-between text-white shrink-0 z-30 h-24 box-border">
                 <button onClick={() => setMode('calendar')} className="p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
@@ -677,20 +872,16 @@ Structure:
                         </button>
                     )}
 
-                    {currentEntry?.charPage && !currentEntry.isArchived && (
-                        <button
-                            onClick={handleSendToChat}
-                            disabled={isSending}
-                            className={`px-4 py-1.5 rounded-full text-xs font-bold shadow-lg transition-all flex items-center gap-2 ${isSending ? 'bg-amber-800 text-amber-200 cursor-not-allowed' : 'bg-amber-500/90 text-white shadow-amber-900/50 active:scale-95'}`}
-                        >
-                            {isSending && <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}
-                            {isSending ? '发送中...' : '发送到聊天'}
-                        </button>
+                    {currentEntry?.chatCardMessageId && (
+                        <div className="px-3 py-1 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 flex items-center gap-1.5" title="该日记已自动同步为聊天卡片">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+                            已同步聊天
+                        </div>
                     )}
                     {currentEntry?.isArchived && (
-                        <div className="px-4 py-1.5 rounded-full text-xs font-bold bg-white/5 text-white/40 flex items-center gap-1.5">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-                            已发送
+                        <div className="px-3 py-1 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 flex items-center gap-1.5" title="该日记已归档进神经链接">
+                            <Archive size={11} weight="fill" />
+                            已归档
                         </div>
                     )}
                     <button onClick={saveEntry} className="px-4 py-1.5 bg-white/10 rounded-full text-xs font-bold hover:bg-white/20 active:scale-95 transition-transform">
