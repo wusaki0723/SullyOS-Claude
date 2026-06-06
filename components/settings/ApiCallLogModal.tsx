@@ -80,6 +80,31 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                 只保留最近 <span className="font-semibold text-slate-500">5 天</span>的调用，超期自动丢弃。记录在你本地浏览器，不上传。
             </p>
 
+            {entries.length > 0 && (() => {
+                const totalTok = entries.reduce((s, e) => s + (e.totalTokens ?? 0), 0);
+                const promptTok = entries.reduce((s, e) => s + (e.promptTokens ?? 0), 0);
+                const compTok = entries.reduce((s, e) => s + (e.completionTokens ?? 0), 0);
+                const fmt = (n: number) => n.toLocaleString('en-US');
+                return (
+                    <div className="mb-3 rounded-2xl bg-primary/5 border border-primary/15 px-4 py-3 flex items-center justify-around text-center">
+                        <div>
+                            <div className="text-[10px] text-slate-400">调用次数</div>
+                            <div className="text-sm font-bold text-slate-600">{entries.length}</div>
+                        </div>
+                        <div className="w-px h-7 bg-slate-200" />
+                        <div>
+                            <div className="text-[10px] text-slate-400">总 Token</div>
+                            <div className="text-sm font-bold text-primary">{fmt(totalTok)}</div>
+                        </div>
+                        <div className="w-px h-7 bg-slate-200" />
+                        <div>
+                            <div className="text-[10px] text-slate-400">输入 / 输出</div>
+                            <div className="text-[11px] font-semibold text-slate-500">{fmt(promptTok)} / {fmt(compTok)}</div>
+                        </div>
+                    </div>
+                );
+            })()}
+
             {loading ? (
                 <div className="py-10 text-center text-sm text-slate-400">加载中…</div>
             ) : entries.length === 0 ? (
@@ -119,6 +144,17 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                     <div className="col-span-2">
                                         <Field label="模型" value={e.model} mono />
                                     </div>
+                                    {(e.totalTokens != null || e.promptTokens != null || e.completionTokens != null) && (
+                                        <div className="col-span-2 flex items-baseline gap-1.5 min-w-0">
+                                            <span className="text-[10px] text-slate-400 shrink-0">Token</span>
+                                            <span className="text-slate-600 truncate">
+                                                {(e.totalTokens ?? 0).toLocaleString('en-US')}
+                                                <span className="text-slate-400">
+                                                    {' '}（入 {(e.promptTokens ?? 0).toLocaleString('en-US')} · 出 {(e.completionTokens ?? 0).toLocaleString('en-US')}）
+                                                </span>
+                                            </span>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         );

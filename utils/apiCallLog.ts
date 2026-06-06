@@ -36,6 +36,12 @@ export interface ApiCallLogEntry extends ApiCallMeta {
     status?: number;
     /** 请求是否成功拿到 JSON */
     ok: boolean;
+    /** 输入 token（prompt_tokens），来自响应 usage，拿不到则空 */
+    promptTokens?: number;
+    /** 输出 token（completion_tokens） */
+    completionTokens?: number;
+    /** 总 token（total_tokens） */
+    totalTokens?: number;
 }
 
 const PRESETS_STORAGE_KEY = 'os_api_presets';
@@ -98,17 +104,31 @@ function resolvePresetName(baseUrl: string, model: string): string {
  * 记录一次 API 调用。fire-and-forget，绝不 throw / 阻塞主链路。
  * 在 safeFetchJson 里对 `/chat/completions` 的成功与失败都会调用。
  */
+/** 从 OpenAI 兼容响应里抠 usage（各家代理大多遵循这个字段）。 */
+function extractUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
+    const usage = (response as any)?.usage;
+    if (!usage || typeof usage !== 'object') return {};
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    return {
+        prompt: num(usage.prompt_tokens),
+        completion: num(usage.completion_tokens),
+        total: num(usage.total_tokens),
+    };
+}
+
 export function recordApiCall(input: {
     url: string;
     body?: unknown;
     status?: number;
     ok: boolean;
+    response?: unknown;
     meta?: ApiCallMeta;
 }): void {
     try {
         const baseUrl = deriveBaseUrl(input.url);
         const model = extractModel(input.body);
         const meta = input.meta || {};
+        const usage = extractUsage(input.response);
         const entry: ApiCallLogEntry = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             timestamp: Date.now(),
@@ -117,6 +137,9 @@ export function recordApiCall(input: {
             model,
             status: input.status,
             ok: input.ok,
+            promptTokens: usage.prompt,
+            completionTokens: usage.completion,
+            totalTokens: usage.total,
             appId: meta.appId,
             appName: meta.appName,
             charId: meta.charId,

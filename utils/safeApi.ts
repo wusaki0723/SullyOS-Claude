@@ -186,7 +186,7 @@ export async function safeFetchJson(
                     requestBody: options.body,
                     response: data,
                 });
-                recordApiCall({ url: urlStr, body: options.body, status: response.status, ok: true, meta });
+                recordApiCall({ url: urlStr, body: options.body, status: response.status, ok: true, response: data, meta });
             }
             return data;
         } catch (e: any) {
