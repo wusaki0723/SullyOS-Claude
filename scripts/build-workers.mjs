@@ -17,7 +17,7 @@
 // through this pipeline.
 
 import { build } from 'esbuild';
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, readFileSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -107,3 +107,15 @@ for (const w of WORKERS) {
   ].filter(Boolean).join(' + ');
   console.log(`✓ ${w.name.padEnd(16)} ${sizeKb} KB  → ${dest}`);
 }
+
+// instant-worker.version.txt — Deno loader 冷启动时拉这个文件决定 bundle 版本号
+// (见 utils/instantPushClient.ts 的 buildDenoLoaderSnippet)。从
+// utils/instantWorkerVersion.ts 提取, 与 /version 路由同源, 不会漂移。
+const versionSrc = readFileSync(resolve(root, 'utils/instantWorkerVersion.ts'), 'utf8');
+const versionMatch = versionSrc.match(/INSTANT_WORKER_VERSION\s*=\s*'([^']+)'/);
+if (!versionMatch) {
+  console.error('ERROR: cannot extract INSTANT_WORKER_VERSION from utils/instantWorkerVersion.ts');
+  process.exit(1);
+}
+writeFileSync(resolve(root, 'public/instant-worker.version.txt'), `${versionMatch[1]}\n`);
+console.log(`✓ instant-worker.version.txt → ${versionMatch[1]}`);

@@ -5,6 +5,7 @@ import {
   INSTANT_PUSH_CONFIG_KEY,
   probeInstantWorkerCapabilities,
   postSsePayloadToServiceWorker,
+  buildDenoLoaderSnippet,
 } from './instantPushClient';
 import type { InstantPushPayload } from './instantPushClient';
 import { savePushVapid } from './pushVapid';
@@ -198,5 +199,19 @@ describe('postSsePayloadToServiceWorker ack 解析', () => {
     const res = await postSsePayloadToServiceWorker({ messageId: 'm3' });
     expect(res.ok).toBe(false);
     expect(res.businessError).toBeUndefined();
+  });
+});
+
+describe('buildDenoLoaderSnippet', () => {
+  it('生成的片段包含 SITE 常量、版本号 fetch 与动态 import', () => {
+    const snippet = buildDenoLoaderSnippet('https://example.com/');
+    expect(snippet).toContain('const SITE = "https://example.com/";');
+    expect(snippet).toContain('instant-worker.version.txt');
+    expect(snippet).toContain('await import(`${SITE}instant-worker.deno.bundle.js${v ? `?v=${v}` : ""}`);');
+  });
+
+  it('site 缺尾斜杠时自动补齐, 避免拼出错误 URL', () => {
+    const snippet = buildDenoLoaderSnippet('https://example.com/sully');
+    expect(snippet).toContain('const SITE = "https://example.com/sully/";');
   });
 });

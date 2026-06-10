@@ -490,6 +490,42 @@ export async function copyInstantWorkerBundleToClipboard(): Promise<void> {
 }
 
 /**
+ * 生成 Deno Deploy Playground 用的 loader 片段（自动追新部署方式）。
+ *
+ * 用户贴一次, 之后每次冷启动 loader 先拉站点发布的最新版本号
+ * (public/instant-worker.version.txt, 由 build:workers 从
+ * utils/instantWorkerVersion.ts 生成, 不会漂移), 再动态 import 带版本号的
+ * bundle URL —— 版本一变 URL 就变, Deno 的模块缓存只认旧 URL, 于是必然
+ * 重新拉取。效果: 部署一次, 永久自动追新, 用户无需再碰 Playground。
+ *
+ * 版本号拉取失败时退回无版本号 URL: Deno 若有缓存副本则继续跑旧版,
+ * 比拒绝启动强。
+ *
+ * @param site 站点根 URL。默认取当前页面 origin + BASE_URL, 自部署站点
+ *             因此天然指向自己发布的那份 bundle。
+ */
+export function buildDenoLoaderSnippet(site?: string): string {
+  let resolvedSite = site ?? new URL(import.meta.env.BASE_URL || '/', window.location.origin).href;
+  if (!resolvedSite.endsWith('/')) resolvedSite += '/';
+  return [
+    '// SullyOS Instant Push — Deno Deploy loader (自动追新)',
+    '// 整段贴进 dash.deno.com 的 Playground 即可, 之后无需手动更新 worker。',
+    `const SITE = ${JSON.stringify(resolvedSite)};`,
+    'let v = "";',
+    'try {',
+    '  v = (await (await fetch(`${SITE}instant-worker.version.txt`, { cache: "no-store" })).text()).trim().replace(/[^0-9A-Za-z._-]/g, "");',
+    '} catch { /* 站点暂时不可用: 退回无版本号 URL */ }',
+    'await import(`${SITE}instant-worker.deno.bundle.js${v ? `?v=${v}` : ""}`);',
+    '',
+  ].join('\n');
+}
+
+/** 复制 Deno loader 片段到剪贴板。与 copyInstantWorkerBundleToClipboard 平行的 Deno 版入口。 */
+export async function copyDenoLoaderToClipboard(): Promise<void> {
+  await navigator.clipboard.writeText(buildDenoLoaderSnippet());
+}
+
+/**
  * 根据用户填的 workerUrl 推算 Cloudflare dashboard 编辑界面的 deep link。
  *
  * Cloudflare 接受 `?to=/:account/...` 模式, 登录后会自动用当前账号 ID 替换 :account
