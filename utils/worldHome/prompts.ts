@@ -10,6 +10,7 @@
  */
 
 import type { CharacterProfile, WorldProfile, WorldHouse, WorldCharBeat, WorldHomeMode } from '../../types';
+import { dmThreadsOf, groupThreadOf, formatThreadForPrompt } from './threads';
 
 /** 剧情时钟 → 时间标签。一轮推进半天：偶数=白天，奇数=夜晚。 */
 export function storyTimeLabel(storyClock: number): string {
@@ -94,27 +95,61 @@ function describeRelationsFor(world: WorldProfile, charId: string, members: Char
 
 /**
  * 单个角色的演绎回合（user turn）。
- * @param beatsSoFar 本轮已演绎完的其他角色的"外部可观察"摘要（位置+行为节选，不含内心）
+ *
+ * 信息分层（防上帝视角的同时保住"同一空间的真实感"）：
+ *   - 同屋的人这半天的行为：全文可见（你们就在一个屋檐下）
+ *   - 非同屋的人：只给位置 + 外在摘要（你能看到/听说的部分）
+ *   - 当面对你说的话：完整呈现并要求接住
+ *   - 你的手机：私聊线程 + 世界群聊的最近消息（含本轮刚收到的，标【刚刚】）
  */
 export function buildWorldCharTurn(args: {
     world: WorldProfile;
     char: CharacterProfile;
     members: CharacterProfile[];
     storyTime: string;
+    round: number;
     lastSummary?: string;
     npcScene?: string;
     npcHooks?: string[];
     beatsSoFar: WorldCharBeat[];
     userName: string;
 }): string {
-    const { world, char, members, storyTime, lastSummary, npcScene, npcHooks, beatsSoFar, userName } = args;
+    const { world, char, members, storyTime, round, lastSummary, npcScene, npcHooks, beatsSoFar, userName } = args;
     const others = members.filter(m => m.id !== char.id);
     const npcNames = new Map(world.npcs.map(n => [n.id, n.name]));
     const myHouse = houseOf(world, char.id);
 
+    // ── 这半天其他人的动静：同屋全文，非同屋摘要 ──
+    const sameHouse = (otherId: string) => !!myHouse && myHouse.residentIds.includes(otherId);
     const observable = beatsSoFar.length > 0
-        ? beatsSoFar.map(b => `- ${b.charName} 在${b.location}：${b.narrative.slice(0, 200)}${b.narrative.length > 200 ? '…' : ''}`).join('\n')
+        ? beatsSoFar.map(b => {
+            if (sameHouse(b.charId)) {
+                return `- ${b.charName}（和你同住，你看得见ta这半天的样子）在${b.location}：\n  ${b.narrative.slice(0, 500)}${b.narrative.length > 500 ? '…' : ''}`;
+            }
+            return `- ${b.charName} 在${b.location}：${b.narrative.slice(0, 200)}${b.narrative.length > 200 ? '…' : ''}`;
+        }).join('\n')
         : '（这半天你是最先行动的人）';
+
+    // ── 当面对你说的话（需要接住） ──
+    const spokenToMe = beatsSoFar.flatMap(b =>
+        (b.dialogues || [])
+            .filter(d => d.with === char.name && d.lines.length > 0)
+            .map(d => `${b.charName}（在${b.location}）当面对你说：\n${d.lines.map(l => `  「${l}」`).join('\n')}`)
+    );
+
+    // ── 你的手机：私聊线程 + 世界群聊 ──
+    const myDms = dmThreadsOf(world, char.id);
+    const group = groupThreadOf(world);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    const dmSection = myDms.length > 0
+        ? myDms.map(t => {
+            const otherName = t.memberIds.filter(id => id !== char.id).map(id => nameById.get(id)).filter(Boolean).join('、') || '?';
+            return `▸ 与 ${otherName} 的私聊：\n${formatThreadForPrompt(t, char.id, 12, round)}`;
+        }).join('\n')
+        : '（私聊里还没有消息）';
+    const groupSection = group && group.messages.length > 0
+        ? `▸ 群聊「${group.name}」：\n${formatThreadForPrompt(group, char.id, 16, round)}`
+        : `▸ 群聊「${group?.name || `${world.name}·大家的群`}」：（还没人说话）`;
 
     return `【家园 · ${world.name}】剧情时间：${storyTime}
 
@@ -138,23 +173,32 @@ ${npcScene ? `\n## 这半天镇上的动静（NPC）\n${npcScene}${npcHooks && n
 
 ## 这半天其他人的动静（你能看到/听说的部分）
 ${observable}
+${spokenToMe.length > 0 ? `\n## 刚才有人当面对你说话（请在 narrative 里自然接住、给出回应）\n${spokenToMe.join('\n')}` : ''}
+
+## 你的手机（标【刚刚】的是这半天刚收到的新消息）
+${dmSection}
+${groupSection}
 
 ---
 现在轮到你了。根据你所在的环境自行判定你此刻在哪、在做什么，演绎你这半天（${storyTime}）的生活。一次调用要产出信息量很高的完整生活切片。
 严格输出一个 JSON 对象（建议用 \`\`\`json 代码块包裹，不要输出 JSON 之外的正文）：
 {
   "location": "你此刻在哪（自己房间/同居小屋的客厅/镇上的某处…自行判定，要和居住安排与他人动静自洽）",
-  "narrative": "小说式的行为与生活描述，第三人称，300~600字。要具体：做了什么、和谁（在场角色按其外在言行互动、NPC 可引用）、环境细节、有温度的小事。",
+  "narrative": "小说式的行为与生活描述，第三人称，300~600字，分2~4个自然段（用\\n\\n分段）。要具体：做了什么、和谁（在场角色按其外在言行互动、NPC 可引用）、环境细节、有温度的小事。",
   "mood": "一两个词的此刻心情",
   "statusPanel": { "体力": 0到100的数字, "心情值": 0到100的数字, "其他你想记录的状态": "自由发挥（最多再加2项）" },
+  "dialogues": [{ "with": "在场成员的名字", "lines": ["你当面对ta说的话（ta的演绎轮里会完整听到）"] }],
   "phone": {
     "posts": ["这半天发的动态（0~2条，没有就给空数组）"],
-    "dms": [{ "to": "同世界某成员的名字", "lines": ["你发给ta的私聊消息（像真的在手机上打字）"] }]
+    "dms": [{ "to": "同世界某成员的名字", "lines": ["你发给ta的私聊消息（像真的在手机上打字，可以连发几条短的）"] }],
+    "group": ["你发到世界群聊的话（0~3条，群里所有人都看得到）"]
   },
   "relationships": [{ "with": "同世界某成员的名字", "delta": -5到5的整数, "reason": "这半天发生了什么让关系变化" }]
 }
 注意：
 - ${world.mode === 'heavy' ? `这个世界里不存在 ${userName || '用户'}，narrative、phone、所有字段都绝不出现 ta。` : world.mode === 'light' ? `${userName || '用户'} 是你心里最重要的人，但此刻不在场——可以在 narrative 或动态里自然流露惦记。` : `${userName || '用户'} 只是世界里的普通一员，不必特意提及。`}
+- 手机里标【刚刚】的消息是别人新发给你的——像真人一样，该回就回（用 phone.dms 回私聊、phone.group 回群聊），不想回也可以已读不回，但要符合你的性格。
+- dialogues 只对此刻真的在你身边的成员用（同住/同一场所）；隔空说话请用手机。
 - phone.dms 只发给同世界成员；没话想说就给空数组。
 - relationships 只在真的发生了影响关系的事时才给，没有就空数组。`;
 }
@@ -185,7 +229,8 @@ ${lastSummary || '（这是这个世界的第一个半天）'}
 一次性输出这半天所有 NPC 的群像动静。严格输出一个 JSON 对象（建议用 \`\`\`json 包裹）：
 {
   "scene": "200~400字的 NPC 群像叙述：谁在做什么、市井气息、天气与街景、和主角们擦肩的小事件。生活感优先，不要推进重大剧情。",
-  "hooks": ["1~3个可以被主角们接住的小事件钩子（例：面包店老板娘今天多烤了一炉栗子面包，见人就塞）"]
+  "hooks": ["1~3个可以被主角们接住的小事件钩子（例：面包店老板娘今天多烤了一炉栗子面包，见人就塞）"],
+  "groupLines": [{ "name": "NPC的名字", "line": "ta在世界群聊里冒泡的一句话（0~2条，市井闲聊/吆喝/通知，别太频繁）" }]
 }`;
 }
 
@@ -236,10 +281,19 @@ export function parseCharBeat(raw: string, char: CharacterProfile, memberNames: 
     const dms = Array.isArray(j.phone?.dms)
         ? j.phone.dms
             .filter((d: any) => d && typeof d.to === 'string' && nameSet.has(d.to) && Array.isArray(d.lines))
-            .map((d: any) => ({ to: d.to, lines: d.lines.map((l: any) => String(l).slice(0, 200)).slice(0, 6) }))
-            .slice(0, 3)
+            .map((d: any) => ({ to: d.to, lines: d.lines.map((l: any) => String(l).slice(0, 200)).filter(Boolean).slice(0, 8) }))
+            .filter((d: any) => d.lines.length > 0)
+            .slice(0, 4)
         : [];
-    const posts = Array.isArray(j.phone?.posts) ? j.phone.posts.map((p: any) => String(p).slice(0, 200)).slice(0, 2) : [];
+    const posts = Array.isArray(j.phone?.posts) ? j.phone.posts.map((p: any) => String(p).slice(0, 300)).filter(Boolean).slice(0, 2) : [];
+    const group = Array.isArray(j.phone?.group) ? j.phone.group.map((l: any) => String(l).slice(0, 200)).filter(Boolean).slice(0, 3) : [];
+    const dialogues = Array.isArray(j.dialogues)
+        ? j.dialogues
+            .filter((d: any) => d && typeof d.with === 'string' && nameSet.has(d.with) && Array.isArray(d.lines))
+            .map((d: any) => ({ with: d.with, lines: d.lines.map((l: any) => String(l).slice(0, 200)).filter(Boolean).slice(0, 8) }))
+            .filter((d: any) => d.lines.length > 0)
+            .slice(0, 4)
+        : [];
     const relationshipDeltas = Array.isArray(j.relationships)
         ? j.relationships
             .filter((r: any) => r && typeof r.with === 'string' && nameSet.has(r.with))
@@ -253,20 +307,27 @@ export function parseCharBeat(raw: string, char: CharacterProfile, memberNames: 
         narrative: typeof j.narrative === 'string' && j.narrative.trim() ? j.narrative.trim() : (fallbackNarrative || '安静地度过了这半天。'),
         mood: typeof j.mood === 'string' && j.mood.trim() ? j.mood.trim().slice(0, 16) : '平静',
         statusPanel: Object.keys(statusPanel).length > 0 ? statusPanel : undefined,
-        phone: (dms.length > 0 || posts.length > 0) ? { posts, dms } : undefined,
+        phone: (dms.length > 0 || posts.length > 0 || group.length > 0) ? { posts, dms, group } : undefined,
+        dialogues: dialogues.length > 0 ? dialogues : undefined,
         relationshipDeltas: relationshipDeltas.length > 0 ? relationshipDeltas : undefined,
     };
 }
 
 /** 解析 NPC 世界引擎输出。 */
-export function parseNpcScene(raw: string): { scene: string; hooks: string[] } {
+export function parseNpcScene(raw: string): { scene: string; hooks: string[]; groupLines: { name: string; line: string }[] } {
     const j = extractJson(raw);
     if (j && typeof j.scene === 'string') {
         return {
             scene: j.scene.trim(),
             hooks: Array.isArray(j.hooks) ? j.hooks.map((h: any) => String(h).slice(0, 120)).slice(0, 3) : [],
+            groupLines: Array.isArray(j.groupLines)
+                ? j.groupLines
+                    .filter((g: any) => g && typeof g.name === 'string' && typeof g.line === 'string' && g.line.trim())
+                    .map((g: any) => ({ name: g.name.trim(), line: g.line.trim().slice(0, 200) }))
+                    .slice(0, 2)
+                : [],
         };
     }
     const fallback = (raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?|```/g, '').trim().slice(0, 500);
-    return { scene: fallback, hooks: [] };
+    return { scene: fallback, hooks: [], groupLines: [] };
 }

@@ -24,7 +24,8 @@ import { getChibi } from '../utils/vrWorld/chibi';
 import { WorldScheduler, WorldTickSlot } from '../utils/worldHome/scheduler';
 import { isWorldRunning } from '../utils/worldHome/engine';
 import { storyTimeLabel, houseOf } from '../utils/worldHome/prompts';
-import type { WorldProfile, WorldEpisode, WorldHomeMode, WorldHouse, CharacterProfile, WorldCharBeat } from '../types';
+import { dmThreadsOf, groupThreadOf } from '../utils/worldHome/threads';
+import type { WorldProfile, WorldEpisode, WorldHomeMode, WorldHouse, WorldThread, CharacterProfile, WorldCharBeat } from '../types';
 
 const genId = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -87,70 +88,138 @@ const ChibiFigure: React.FC<{ char: CharacterProfile; size?: number; bob?: boole
 };
 
 // ============================================================
-// 真手机弹窗：角色这半天的手机（动态=信息流，私信=聊天气泡）
+// 真手机弹窗：角色的手机（持久的——动态是历史信息流，私信/群聊是
+// 跨轮累积的真实会话：A 发的和 B 的回应交替出现）
 // ============================================================
+
+/** 会话气泡流：自己右绿、对方左白带头像，剧情时间变化处插分隔条。 */
+const ThreadBubbles: React.FC<{
+    thread: WorldThread;
+    selfId: string;
+    members: CharacterProfile[];
+    npcs: WorldProfile['npcs'];
+    showNames?: boolean;
+}> = ({ thread, selfId, members, npcs, showNames }) => {
+    const avatarOf = (id: string) => members.find(m => m.id === id)?.avatar;
+    const emojiOf = (id: string) => npcs.find(n => n.id === id)?.emoji || '🙂';
+    const isNpc = (id: string) => npcs.some(n => n.id === id);
+    const els: React.ReactNode[] = [];
+    let lastTime = '';
+    thread.messages.forEach(m => {
+        if (m.storyTime !== lastTime) {
+            lastTime = m.storyTime;
+            els.push(
+                <div key={`div_${m.id}`} className="flex items-center gap-2 py-1">
+                    <div className="flex-1 h-px bg-white/10" />
+                    <span className="text-[8.5px] text-white/40 font-bold tracking-wider">{m.storyTime}</span>
+                    <div className="flex-1 h-px bg-white/10" />
+                </div>
+            );
+        }
+        const mine = m.fromId === selfId;
+        els.push(
+            <div key={m.id} className={`flex items-end gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>
+                {!mine && (
+                    avatarOf(m.fromId)
+                        ? <img src={avatarOf(m.fromId)} className="w-[22px] h-[22px] rounded-full object-cover shrink-0" alt="" />
+                        : <div className="w-[22px] h-[22px] rounded-full bg-white/15 flex items-center justify-center text-[11px] shrink-0">{isNpc(m.fromId) ? emojiOf(m.fromId) : m.fromName.slice(0, 1)}</div>
+                )}
+                <div className={`max-w-[78%] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
+                    {!mine && showNames && <div className="text-[8.5px] text-white/45 font-bold mb-0.5 px-1">{m.fromName}{isNpc(m.fromId) ? ' · NPC' : ''}</div>}
+                    <div className={`px-2.5 py-1.5 text-[11px] leading-[1.5] shadow-sm ${mine
+                        ? 'rounded-2xl rounded-br-md bg-gradient-to-br from-emerald-400 to-emerald-500 text-white'
+                        : 'rounded-2xl rounded-bl-md bg-white/95 text-slate-800'}`}>
+                        {m.text}
+                    </div>
+                </div>
+            </div>
+        );
+    });
+    return <>{els}</>;
+};
+
 const PhoneModal: React.FC<{
-    beat: WorldCharBeat;
-    char?: CharacterProfile;
-    storyTime: string;
+    ownerId: string;
+    world: WorldProfile;
+    episodes: WorldEpisode[];
+    members: CharacterProfile[];
+    initialTab?: 'feed' | 'dm' | 'group';
     onClose: () => void;
-}> = ({ beat, char, storyTime, onClose }) => {
-    const [tab, setTab] = useState<'feed' | 'dm'>('feed');
-    const posts = beat.phone?.posts || [];
-    const dms = beat.phone?.dms || [];
-    const avatar = char?.avatar;
+}> = ({ ownerId, world, episodes, members, initialTab, onClose }) => {
+    const [tab, setTab] = useState<'feed' | 'dm' | 'group'>(initialTab || 'feed');
+    const owner = members.find(m => m.id === ownerId);
+    const ownerName = owner?.name || '?';
+    const avatar = owner?.avatar;
+    const dmThreads = dmThreadsOf(world, ownerId);
+    const [dmIdx, setDmIdx] = useState(0);
+    const group = groupThreadOf(world);
+    const latestBeat = episodes[0]?.beats.find(b => b.charId === ownerId);
+    const nameById = (id: string) => members.find(m => m.id === id)?.name || '?';
+
+    // 动态：跨轮聚合该角色发过的所有 posts（新的在上）
+    const feed = useMemo(() => {
+        const out: { storyTime: string; location: string; post: string; round: number }[] = [];
+        for (const ep of episodes) {
+            const b = ep.beats.find(x => x.charId === ownerId);
+            for (const p of b?.phone?.posts || []) out.push({ storyTime: ep.storyTime, location: b!.location, post: p, round: ep.round });
+        }
+        return out;
+    }, [episodes, ownerId]);
+
+    const dmCount = dmThreads.reduce((s, t) => s + t.messages.length, 0);
+    const activeDm = dmThreads[Math.min(dmIdx, Math.max(0, dmThreads.length - 1))];
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
             <div className="relative" onClick={e => e.stopPropagation()}>
                 {/* 手机壳 */}
-                <div className="w-[272px] h-[548px] rounded-[2.6rem] bg-gradient-to-b from-zinc-800 to-zinc-950 p-[7px] shadow-[0_24px_60px_rgba(0,0,0,.6),inset_0_1px_1px_rgba(255,255,255,.18)]">
+                <div className="w-[280px] h-[572px] rounded-[2.6rem] bg-gradient-to-b from-zinc-800 to-zinc-950 p-[7px] shadow-[0_24px_60px_rgba(0,0,0,.6),inset_0_1px_1px_rgba(255,255,255,.18)]">
                     <div className="relative w-full h-full rounded-[2.15rem] overflow-hidden flex flex-col" style={{ background: 'linear-gradient(170deg,#101426 0%,#1b2138 60%,#232a47 100%)' }}>
                         {/* 灵动岛 */}
                         <div className="absolute top-2 left-1/2 -translate-x-1/2 w-20 h-[18px] rounded-full bg-black z-20" />
                         {/* 状态栏 */}
                         <div className="pt-2.5 pb-1 px-5 flex items-center justify-between text-[9px] text-white/80 font-semibold shrink-0">
-                            <span>{storyTime}</span>
+                            <span>{storyTimeLabel(world.storyClock)}</span>
                             <span className="flex items-center gap-1"><CellSignalFull size={10} weight="fill" /><WifiHigh size={10} weight="bold" /><BatteryFull size={12} weight="fill" /></span>
                         </div>
                         {/* 机主栏 */}
                         <div className="px-4 pt-2 pb-3 flex items-center gap-2.5 shrink-0">
                             {avatar
                                 ? <img src={avatar} className="w-9 h-9 rounded-2xl object-cover ring-2 ring-white/20" alt="" />
-                                : <div className="w-9 h-9 rounded-2xl bg-white/15 flex items-center justify-center text-white font-bold">{beat.charName.slice(0, 1)}</div>}
+                                : <div className="w-9 h-9 rounded-2xl bg-white/15 flex items-center justify-center text-white font-bold">{ownerName.slice(0, 1)}</div>}
                             <div className="min-w-0">
-                                <div className="text-[13px] font-bold text-white truncate">{beat.charName} 的手机</div>
-                                <div className="text-[9.5px] text-white/50">{beat.location} · {beat.mood}</div>
+                                <div className="text-[13px] font-bold text-white truncate">{ownerName} 的手机</div>
+                                <div className="text-[9.5px] text-white/50">{latestBeat ? `${latestBeat.location} · ${latestBeat.mood}` : `${world.name} 居民`}</div>
                             </div>
                             <button onClick={onClose} className="ml-auto p-1.5 rounded-full bg-white/10 text-white/70 active:scale-90"><X size={13} weight="bold" /></button>
                         </div>
                         {/* Tab */}
                         <div className="px-4 flex gap-1.5 shrink-0">
-                            {([['feed', '动态', Article], ['dm', '私信', ChatCircleDots]] as const).map(([id, label, Icon]) => (
+                            {([['feed', '动态', Article, feed.length], ['dm', '私信', ChatCircleDots, dmCount], ['group', '群聊', UsersThree, group?.messages.length || 0]] as const).map(([id, label, Icon, count]) => (
                                 <button key={id} onClick={() => setTab(id)}
-                                    className={`flex-1 py-1.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-colors ${tab === id ? 'bg-white text-slate-900' : 'bg-white/10 text-white/60'}`}>
+                                    className={`flex-1 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center justify-center gap-1 transition-colors ${tab === id ? 'bg-white text-slate-900' : 'bg-white/10 text-white/60'}`}>
                                     <Icon size={12} weight="bold" />{label}
-                                    <span className={`text-[8.5px] px-1 rounded-full ${tab === id ? 'bg-slate-900/10' : 'bg-white/10'}`}>{id === 'feed' ? posts.length : dms.length}</span>
+                                    <span className={`text-[8px] px-1 rounded-full ${tab === id ? 'bg-slate-900/10' : 'bg-white/10'}`}>{count}</span>
                                 </button>
                             ))}
                         </div>
                         {/* 内容 */}
-                        <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-3 space-y-2.5">
+                        <div className="flex-1 overflow-y-auto no-scrollbar px-3.5 py-3 space-y-2">
                             {tab === 'feed' && (
-                                posts.length === 0
-                                    ? <div className="text-center text-[11px] text-white/40 pt-16">这半天没发动态</div>
-                                    : posts.map((p, i) => (
+                                feed.length === 0
+                                    ? <div className="text-center text-[11px] text-white/40 pt-16">还没发过动态</div>
+                                    : feed.map((f, i) => (
                                         <div key={i} className="rounded-2xl bg-white/95 p-3 shadow-sm">
                                             <div className="flex items-center gap-2">
                                                 {avatar
                                                     ? <img src={avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
-                                                    : <div className="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">{beat.charName.slice(0, 1)}</div>}
+                                                    : <div className="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">{ownerName.slice(0, 1)}</div>}
                                                 <div>
-                                                    <div className="text-[10.5px] font-bold text-slate-800 leading-none">{beat.charName}</div>
-                                                    <div className="text-[8.5px] text-slate-400 mt-0.5">{storyTime} · 来自{beat.location}</div>
+                                                    <div className="text-[10.5px] font-bold text-slate-800 leading-none">{ownerName}</div>
+                                                    <div className="text-[8.5px] text-slate-400 mt-0.5">{f.storyTime} · 来自{f.location}</div>
                                                 </div>
                                             </div>
-                                            <p className="text-[11.5px] leading-[1.6] text-slate-700 mt-2 whitespace-pre-wrap">{p}</p>
+                                            <p className="text-[11.5px] leading-[1.6] text-slate-700 mt-2 whitespace-pre-wrap">{f.post}</p>
                                             <div className="mt-2 pt-1.5 border-t border-slate-100 flex items-center gap-3 text-slate-400">
                                                 <span className="flex items-center gap-0.5 text-[9px]"><Heart size={11} /> 喜欢</span>
                                                 <span className="flex items-center gap-0.5 text-[9px]"><ChatCircleDots size={11} /> 评论</span>
@@ -159,24 +228,40 @@ const PhoneModal: React.FC<{
                                     ))
                             )}
                             {tab === 'dm' && (
-                                dms.length === 0
-                                    ? <div className="text-center text-[11px] text-white/40 pt-16">这半天没给谁发消息</div>
-                                    : dms.map((d, i) => (
-                                        <div key={i} className="rounded-2xl bg-white/95 overflow-hidden shadow-sm">
-                                            <div className="px-3 py-1.5 bg-slate-100/90 text-[10px] font-bold text-slate-600 flex items-center gap-1">
-                                                <ChatCircleDots size={11} weight="bold" />发给 {d.to}
-                                            </div>
-                                            <div className="p-2.5 space-y-1.5">
-                                                {d.lines.map((l, j) => (
-                                                    <div key={j} className="flex justify-end">
-                                                        <div className="max-w-[85%] px-2.5 py-1.5 rounded-2xl rounded-br-md bg-gradient-to-br from-emerald-400 to-emerald-500 text-white text-[11px] leading-snug shadow-sm">
-                                                            {l}
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
+                                dmThreads.length === 0
+                                    ? <div className="text-center text-[11px] text-white/40 pt-16">私信里还没有会话</div>
+                                    : (
+                                        <>
+                                            {dmThreads.length > 1 && (
+                                                <div className="flex gap-1.5 pb-1 sticky top-0">
+                                                    {dmThreads.map((t, i) => {
+                                                        const otherName = t.memberIds.filter(id => id !== ownerId).map(nameById).join('、');
+                                                        return (
+                                                            <button key={t.id} onClick={() => setDmIdx(i)}
+                                                                className={`text-[9.5px] px-2 py-1 rounded-full font-bold ${i === dmIdx ? 'bg-white text-slate-900' : 'bg-white/10 text-white/60'}`}>
+                                                                {otherName} <span className="opacity-60">{t.messages.length}</span>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                            {activeDm && (
+                                                <div className="space-y-1.5">
+                                                    <ThreadBubbles thread={activeDm} selfId={ownerId} members={members} npcs={world.npcs} />
+                                                </div>
+                                            )}
+                                        </>
+                                    )
+                            )}
+                            {tab === 'group' && (
+                                !group || group.messages.length === 0
+                                    ? <div className="text-center text-[11px] text-white/40 pt-16">群里还没人说话</div>
+                                    : (
+                                        <div className="space-y-1.5">
+                                            <div className="text-center text-[9px] text-white/40 font-bold pb-1">「{group.name}」 · {group.memberIds.length} 人{world.npcs.length > 0 ? ` + ${world.npcs.length} NPC` : ''}</div>
+                                            <ThreadBubbles thread={group} selfId={ownerId} members={members} npcs={world.npcs} showNames />
                                         </div>
-                                    ))
+                                    )
                             )}
                         </div>
                         {/* home indicator */}
@@ -434,7 +519,7 @@ const WorldView: React.FC<{
     );
     const [openHouseId, setOpenHouseId] = useState<string | null>(null);
     const [openEpisodeId, setOpenEpisodeId] = useState<string | null>(null);
-    const [phoneBeat, setPhoneBeat] = useState<WorldCharBeat | null>(null);
+    const [phoneView, setPhoneView] = useState<{ ownerId: string; tab?: 'feed' | 'dm' | 'group' } | null>(null);
 
     const members = useMemo(() => world.memberIds.map(id => characters.find(c => c.id === id)).filter(Boolean) as CharacterProfile[], [world.memberIds, characters]);
     const latest = episodes[0];
@@ -607,7 +692,17 @@ const WorldView: React.FC<{
                                         <div className={`px-3 pb-3 space-y-2.5 border-t ${t.divider}`}>
                                             {residents.map(r => {
                                                 const b = beatOf(r.id);
-                                                if (!b) return <div key={r.id} className={`text-[11px] px-1 pt-2.5 ${t.textSub}`}>{r.name} 这半天还没有故事，先观测一轮。</div>;
+                                                if (!b) {
+                                                    return (
+                                                        <div key={r.id} className={`flex items-center gap-2 text-[11px] px-1 pt-2.5 ${t.textSub}`}>
+                                                            <span>{r.name} 这半天还没有故事，先观测一轮。</span>
+                                                            <button onClick={() => setPhoneView({ ownerId: r.id })}
+                                                                className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform shrink-0">
+                                                                <DeviceMobile size={11} weight="fill" />手机
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
                                                 return (
                                                     <div key={r.id} className={`mt-2.5 rounded-xl border p-3 ${t.panelSolid}`}>
                                                         <div className="flex items-center gap-2">
@@ -615,14 +710,26 @@ const WorldView: React.FC<{
                                                                 <MapPin size={11} weight="fill" className="text-amber-500" />{b.charName} 在{b.location}
                                                             </span>
                                                             <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-400/20 text-amber-600 border border-amber-400/30">{b.mood}</span>
-                                                            {(b.phone?.posts?.length || b.phone?.dms?.length) ? (
-                                                                <button onClick={() => setPhoneBeat(b)}
-                                                                    className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform">
-                                                                    <DeviceMobile size={11} weight="fill" />看手机
-                                                                </button>
-                                                            ) : null}
+                                                            <button onClick={() => setPhoneView({ ownerId: r.id })}
+                                                                className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform shrink-0">
+                                                                <DeviceMobile size={11} weight="fill" />看手机
+                                                            </button>
                                                         </div>
-                                                        <p className={`text-[12px] leading-[1.7] mt-2 whitespace-pre-wrap ${t.textMain} opacity-90`}>{b.narrative}</p>
+                                                        <div className="mt-2 space-y-2">
+                                                            {b.narrative.split(/\n+/).filter(Boolean).map((para, i) => (
+                                                                <p key={i} className={`text-[12.5px] leading-[1.85] tracking-[0.01em] ${t.textMain} opacity-90`} style={{ textIndent: '2em' }}>{para}</p>
+                                                            ))}
+                                                        </div>
+                                                        {b.dialogues && b.dialogues.length > 0 && (
+                                                            <div className="mt-2.5 space-y-1.5">
+                                                                {b.dialogues.map((d, i) => (
+                                                                    <div key={i} className="rounded-lg border-l-2 border-amber-400/70 bg-amber-400/10 px-2.5 py-1.5">
+                                                                        <div className="text-[9px] font-black text-amber-600 mb-0.5">当面对 {d.with} 说</div>
+                                                                        {d.lines.map((l, j) => <div key={j} className={`text-[11.5px] leading-[1.6] ${t.textMain} opacity-90`}>「{l}」</div>)}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                         {b.statusPanel && (
                                                             <div className="mt-2.5 grid grid-cols-2 gap-1.5">
                                                                 {Object.entries(b.statusPanel).map(([k, v]) => (
@@ -647,6 +754,29 @@ const WorldView: React.FC<{
                         })}
                     </div>
                 </div>
+
+                {/* ── 世界群聊（公共空间：成员 + NPC 都在里面冒泡） ── */}
+                {(() => {
+                    const group = groupThreadOf(world);
+                    if (!group || group.messages.length === 0) return null;
+                    const recent = group.messages.slice(-3);
+                    return (
+                        <button onClick={() => members[0] && setPhoneView({ ownerId: members[0].id, tab: 'group' })}
+                            className={`w-full text-left rounded-2xl border p-3.5 ${t.panel} active:scale-[0.99] transition-transform`}>
+                            <div className={`text-[10px] font-black tracking-[0.25em] uppercase flex items-center gap-1.5 mb-2 ${t.textLabel}`}>
+                                <ChatCircleDots size={11} weight="fill" />「{group.name}」
+                                <span className="ml-auto normal-case tracking-normal font-bold text-[9px] opacity-70">{group.messages.length} 条 · 点开看全部</span>
+                            </div>
+                            <div className="space-y-1">
+                                {recent.map(m => (
+                                    <div key={m.id} className={`text-[11px] leading-snug truncate ${t.textMain} opacity-85`}>
+                                        <span className="font-bold">{m.fromName}：</span>{m.text}
+                                    </div>
+                                ))}
+                            </div>
+                        </button>
+                    );
+                })()}
 
                 {/* ── 关系（有向：同一对上下两根，直观看出不对等） ── */}
                 {world.relationships.length > 0 && (
@@ -731,11 +861,23 @@ const WorldView: React.FC<{
                                                     <div key={b.charId} className={`rounded-xl border p-2.5 ${t.panelSolid}`}>
                                                         <div className="flex items-center gap-2">
                                                             <span className={`text-[11px] font-black ${t.textMain}`}>{b.charName} · {b.location} · {b.mood}</span>
-                                                            {(b.phone?.posts?.length || b.phone?.dms?.length) ? (
-                                                                <button onClick={() => setPhoneBeat(b)} className="ml-auto p-1 rounded-md bg-slate-900 text-white active:scale-90"><DeviceMobile size={11} weight="fill" /></button>
-                                                            ) : null}
+                                                            <button onClick={() => setPhoneView({ ownerId: b.charId })} className="ml-auto p-1 rounded-md bg-slate-900 text-white active:scale-90 shrink-0"><DeviceMobile size={11} weight="fill" /></button>
                                                         </div>
-                                                        <p className={`text-[11.5px] leading-[1.65] mt-1 whitespace-pre-wrap ${t.textMain} opacity-85`}>{b.narrative}</p>
+                                                        <div className="mt-1.5 space-y-1.5">
+                                                            {b.narrative.split(/\n+/).filter(Boolean).map((para, i) => (
+                                                                <p key={i} className={`text-[11.5px] leading-[1.75] ${t.textMain} opacity-85`} style={{ textIndent: '2em' }}>{para}</p>
+                                                            ))}
+                                                        </div>
+                                                        {b.dialogues && b.dialogues.length > 0 && (
+                                                            <div className="mt-2 space-y-1">
+                                                                {b.dialogues.map((d, i) => (
+                                                                    <div key={i} className="rounded-lg border-l-2 border-amber-400/70 bg-amber-400/10 px-2 py-1">
+                                                                        <span className="text-[9px] font-black text-amber-600">对 {d.with}：</span>
+                                                                        <span className={`text-[10.5px] ${t.textMain} opacity-85`}>{d.lines.map(l => `「${l}」`).join(' ')}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>
@@ -753,12 +895,14 @@ const WorldView: React.FC<{
             </div>
 
             {/* 真手机弹窗 */}
-            {phoneBeat && (
+            {phoneView && (
                 <PhoneModal
-                    beat={phoneBeat}
-                    char={members.find(m => m.id === phoneBeat.charId)}
-                    storyTime={latest?.storyTime || storyTimeLabel(Math.max(0, world.storyClock - 1))}
-                    onClose={() => setPhoneBeat(null)}
+                    ownerId={phoneView.ownerId}
+                    world={world}
+                    episodes={episodes}
+                    members={members}
+                    initialTab={phoneView.tab}
+                    onClose={() => setPhoneView(null)}
                 />
             )}
         </div>

@@ -27,6 +27,7 @@ import {
     storyTimeLabel, buildWorldSystemAddendum, buildWorldCharTurn, buildNpcTurn,
     parseCharBeat, parseNpcScene,
 } from './prompts';
+import { ensureThreads, applyBeatToThreads, applyNpcGroupLines } from './threads';
 
 interface MemoryConfigLike {
     embedding?: { baseUrl?: string; apiKey?: string; model?: string; dimensions?: number };
@@ -95,11 +96,17 @@ function buildCardContent(world: WorldProfile, storyTime: string, beat: WorldCha
         `${beat.charName} 在${beat.location}（${beat.mood}）`,
         beat.narrative,
     ];
+    if (beat.dialogues?.length) {
+        for (const d of beat.dialogues) lines.push(`当面对 ${d.with} 说：${d.lines.join(' / ')}`);
+    }
     if (beat.phone?.posts?.length) {
         for (const p of beat.phone.posts) lines.push(`发了动态：${p}`);
     }
     if (beat.phone?.dms?.length) {
         for (const d of beat.phone.dms) lines.push(`给 ${d.to} 发消息：${d.lines.join(' / ')}`);
+    }
+    if (beat.phone?.group?.length) {
+        lines.push(`在世界群聊里说：${beat.phone.group.join(' / ')}`);
     }
     return lines.join('\n');
 }
@@ -120,6 +127,10 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
 
     running.add(world.id);
     const storyTime = storyTimeLabel(world.storyClock);
+    const round = world.storyClock + 1;
+    // 线程容器就位：本轮所有消息（NPC 群聊冒泡 / 角色私聊与群聊）都即时落在 world.threads 上，
+    // 链式后续角色构建上下文时直接读到——消息在同一轮内就完成传递。
+    ensureThreads(world);
     dispatch('world-episode-start', { worldId: world.id, worldName: world.name, storyTime, total: members.length });
 
     try {
@@ -146,6 +157,8 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                 const parsed = parseNpcScene(npcData.choices?.[0]?.message?.content || '');
                 npcScene = parsed.scene || undefined;
                 npcHooks = parsed.hooks;
+                // NPC 在世界群聊里冒泡（先落线程，角色们这轮就能看到并接话）
+                applyNpcGroupLines(world, parsed.groupLines, round, storyTime);
             } catch (e) {
                 // NPC 失败不阻塞角色演绎——世界这半天只是安静一点
                 console.warn('[WorldHome] NPC engine failed, continuing without npcScene:', e);
@@ -179,7 +192,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                 });
                 const systemPrompt = payload.systemPrompt + buildWorldSystemAddendum(world, char, userProfile?.name || '');
                 const turn = buildWorldCharTurn({
-                    world, char, members, storyTime, lastSummary,
+                    world, char, members, storyTime, round, lastSummary,
                     npcScene, npcHooks, beatsSoFar: beats, userName: userProfile?.name || '',
                 });
 
@@ -194,6 +207,8 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                 }, 2, 0, { appName: '家园', charId: char.id, charName: char.name, purpose: `演绎 · ${world.name}` });
                 const beat = parseCharBeat(data.choices?.[0]?.message?.content || '', char, memberNames);
                 beats.push(beat);
+                // 该角色发出的私聊/群聊立刻落线程——后面还没演绎的角色这一轮就能收到并回应
+                applyBeatToThreads(world, beat, members, round, storyTime);
                 anyCharOk = true;
             } catch (e) {
                 // 单个角色失败不拖垮整轮——这半天 ta 只是没什么动静
@@ -208,7 +223,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
         const episode: WorldEpisode = {
             id: genId('we'),
             worldId: world.id,
-            round: world.storyClock + 1,
+            round,
             storyTime,
             trigger,
             npcScene,
@@ -223,6 +238,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
         const updatedWorld: WorldProfile = {
             ...world,
             relationships: world.relationships,
+            threads: world.threads, // 本轮累积的私聊/群聊消息一并持久化
             storyClock: world.storyClock + 1,
             updatedAt: Date.now(),
         };
@@ -243,6 +259,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                     narrative: beat.narrative,
                     statusPanel: beat.statusPanel,
                     phonePosts: beat.phone?.posts,
+                    phoneGroup: beat.phone?.group,
                 };
                 try {
                     await DB.saveMessage({

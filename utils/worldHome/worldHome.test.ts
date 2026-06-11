@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { extractJson, parseCharBeat, parseNpcScene, storyTimeLabel, buildModeRule, buildWorldCharTurn } from './prompts';
 import { applyRelationshipDeltas } from './engine';
+import { ensureThreads, applyBeatToThreads, applyNpcGroupLines, dmThreadsOf, groupThreadOf, formatThreadForPrompt, dmThreadId, GROUP_THREAD_ID } from './threads';
 import { WorldScheduler } from './scheduler';
 import type { CharacterProfile, WorldProfile } from '../../types';
 
@@ -72,6 +73,17 @@ describe('parseCharBeat', () => {
         expect(beat.charName).toBe('小满');
     });
 
+    it('解析当面对话与群聊发言，过滤非成员的对话对象', () => {
+        const raw = JSON.stringify({
+            location: '客厅', narrative: 'x', mood: 'y',
+            dialogues: [{ with: '阿岚', lines: ['早啊'] }, { with: '路人', lines: ['?'] }],
+            phone: { group: ['今天谁做饭'] },
+        });
+        const beat = parseCharBeat(raw, char, members);
+        expect(beat.dialogues).toEqual([{ with: '阿岚', lines: ['早啊'] }]);
+        expect(beat.phone?.group).toEqual(['今天谁做饭']);
+    });
+
     it('过滤非成员的私聊对象与关系对象，delta 截断到 ±5', () => {
         const raw = JSON.stringify({
             location: '镇上', narrative: 'x', mood: 'y',
@@ -86,15 +98,17 @@ describe('parseCharBeat', () => {
 });
 
 describe('parseNpcScene', () => {
-    it('解析 scene + hooks', () => {
-        const out = parseNpcScene('```json\n{"scene":"面包店飘香。","hooks":["老板娘多烤了一炉"]}\n```');
+    it('解析 scene + hooks + 群聊冒泡', () => {
+        const out = parseNpcScene('```json\n{"scene":"面包店飘香。","hooks":["老板娘多烤了一炉"],"groupLines":[{"name":"老板娘","line":"栗子包出炉咯"}]}\n```');
         expect(out.scene).toBe('面包店飘香。');
         expect(out.hooks).toEqual(['老板娘多烤了一炉']);
+        expect(out.groupLines).toEqual([{ name: '老板娘', line: '栗子包出炉咯' }]);
     });
     it('解析失败时原文兜底', () => {
         const out = parseNpcScene('镇子很安静。');
         expect(out.scene).toBe('镇子很安静。');
         expect(out.hooks).toEqual([]);
+        expect(out.groupLines).toEqual([]);
     });
 });
 
@@ -117,13 +131,44 @@ describe('buildWorldCharTurn', () => {
         const world = mkWorld();
         const members = [mkChar('a', '小满'), mkChar('b', '阿岚')];
         const turn = buildWorldCharTurn({
-            world, char: members[1], members, storyTime: '第1天白天',
+            world, char: members[1], members, storyTime: '第1天白天', round: 1,
             beatsSoFar: [{ charId: 'a', charName: '小满', location: '厨房', narrative: '热汤。'.repeat(100), mood: '松弛' }],
             userName: '阿月',
         });
         expect(turn).toContain('小满 在厨房');
         expect(turn).toContain('…'); // 200 字截断
         expect(turn).not.toContain('松弛'); // 心情属于内心状态，不外泄给其他角色
+    });
+
+    it('同屋角色能看到更完整的行为（同一屋檐下），并完整听到当面对自己说的话', () => {
+        const world = mkWorld({ houses: [{ id: 'h1', name: '合租屋', residentIds: ['a', 'b'] }] });
+        const members = [mkChar('a', '小满'), mkChar('b', '阿岚')];
+        const narrative = '热汤。'.repeat(100); // 300 字
+        const turn = buildWorldCharTurn({
+            world, char: members[1], members, storyTime: '第1天白天', round: 1,
+            beatsSoFar: [{
+                charId: 'a', charName: '小满', location: '合租屋的厨房', narrative, mood: '松弛',
+                dialogues: [{ with: '阿岚', lines: ['汤好了，趁热'] }],
+            }],
+            userName: '',
+        });
+        expect(turn).toContain('和你同住');
+        expect(turn).toContain(narrative.slice(0, 400)); // 同屋全文可见（500 字内）
+        expect(turn).toContain('当面对你说');
+        expect(turn).toContain('「汤好了，趁热」');
+    });
+
+    it('手机段：先演绎角色刚发的私聊/群聊出现在后演绎角色的上下文里，标【刚刚】', () => {
+        const world = mkWorld();
+        const members = [mkChar('a', '小满'), mkChar('b', '阿岚')];
+        applyBeatToThreads(world, {
+            charId: 'a', charName: '小满', location: 'x', narrative: 'y', mood: 'z',
+            phone: { dms: [{ to: '阿岚', lines: ['睡了吗'] }], group: ['今晚月色不错'] },
+        }, members, 3, '第2天白天');
+        const turn = buildWorldCharTurn({ world, char: members[1], members, storyTime: '第2天白天', round: 3, beatsSoFar: [], userName: '' });
+        expect(turn).toContain('与 小满 的私聊');
+        expect(turn).toContain('【刚刚】 小满：睡了吗');
+        expect(turn).toContain('【刚刚】 小满：今晚月色不错');
     });
 
     it('关系有向：自己的视角带数值，对方对自己只有模糊体感（不泄露数值与关系名）', () => {
@@ -134,7 +179,7 @@ describe('buildWorldCharTurn', () => {
             ],
         });
         const members = [mkChar('a', '小满'), mkChar('b', '阿岚')];
-        const turn = buildWorldCharTurn({ world, char: members[0], members, storyTime: '第1天白天', beatsSoFar: [], userName: '' });
+        const turn = buildWorldCharTurn({ world, char: members[0], members, storyTime: '第1天白天', round: 1, beatsSoFar: [], userName: '' });
         expect(turn).toContain('你对 阿岚：单恋，非常亲近（85/100）');
         expect(turn).toContain('你能隐约感觉到 阿岚 对你的态度：有些疏远');
         expect(turn).not.toContain('30/100');     // 对方的数值是对方的内心
@@ -144,9 +189,46 @@ describe('buildWorldCharTurn', () => {
     it('独居与同居安排都体现在 prompt 里', () => {
         const world = mkWorld({ houses: [{ id: 'h1', name: '合租屋', residentIds: ['a', 'b'] }], memberIds: ['a', 'b', 'c'] });
         const members = [mkChar('a', '小满'), mkChar('b', '阿岚'), mkChar('c', '十一')];
-        const turn = buildWorldCharTurn({ world, char: members[0], members, storyTime: '第1天白天', beatsSoFar: [], userName: '' });
+        const turn = buildWorldCharTurn({ world, char: members[0], members, storyTime: '第1天白天', round: 1, beatsSoFar: [], userName: '' });
         expect(turn).toContain('合租屋：小满、阿岚 同住');
         expect(turn).toContain('十一 独居');
+    });
+});
+
+describe('世界消息线程（交替传递）', () => {
+    const members = [{ id: 'a', name: '小满' }, { id: 'b', name: '阿岚' }];
+
+    it('A 发的私聊与 B 的回复进同一条 dm 线程，按时间交替', () => {
+        const world = mkWorld();
+        applyBeatToThreads(world, { charId: 'a', charName: '小满', location: 'x', narrative: 'y', mood: 'z', phone: { dms: [{ to: '阿岚', lines: ['在吗', '想你了'] }] } }, members, 1, '第1天白天');
+        applyBeatToThreads(world, { charId: 'b', charName: '阿岚', location: 'x', narrative: 'y', mood: 'z', phone: { dms: [{ to: '小满', lines: ['刚看到，怎么啦'] }] } }, members, 1, '第1天白天');
+        const threads = dmThreadsOf(world, 'a');
+        expect(threads).toHaveLength(1);
+        expect(threads[0].id).toBe(dmThreadId('a', 'b'));
+        expect(threads[0].messages.map(m => `${m.fromName}:${m.text}`)).toEqual([
+            '小满:在吗', '小满:想你了', '阿岚:刚看到，怎么啦',
+        ]);
+        // B 的视角是同一条线程
+        expect(dmThreadsOf(world, 'b')[0].id).toBe(threads[0].id);
+    });
+
+    it('群聊：成员发言与 NPC 冒泡都进 group_main，NPC 名字必须真实存在', () => {
+        const world = mkWorld({ npcs: [{ id: 'n1', name: '老板娘', persona: '面包店' }] });
+        ensureThreads(world);
+        applyNpcGroupLines(world, [{ name: '老板娘', line: '新出炉的栗子包！' }, { name: '不存在的人', line: 'x' }], 1, '第1天白天');
+        applyBeatToThreads(world, { charId: 'a', charName: '小满', location: 'x', narrative: 'y', mood: 'z', phone: { group: ['冲了'] } }, members, 1, '第1天白天');
+        const group = groupThreadOf(world)!;
+        expect(group.id).toBe(GROUP_THREAD_ID);
+        expect(group.messages.map(m => m.fromName)).toEqual(['老板娘', '小满']);
+    });
+
+    it('formatThreadForPrompt：本轮消息标【刚刚】，历史消息标剧情时间', () => {
+        const world = mkWorld();
+        applyBeatToThreads(world, { charId: 'a', charName: '小满', location: 'x', narrative: 'y', mood: 'z', phone: { dms: [{ to: '阿岚', lines: ['老消息'] }] } }, members, 1, '第1天白天');
+        applyBeatToThreads(world, { charId: 'a', charName: '小满', location: 'x', narrative: 'y', mood: 'z', phone: { dms: [{ to: '阿岚', lines: ['新消息'] }] } }, members, 2, '第1天夜晚');
+        const text = formatThreadForPrompt(dmThreadsOf(world, 'b')[0], 'b', 10, 2);
+        expect(text).toContain('[第1天白天] 小满：老消息');
+        expect(text).toContain('【刚刚】 小满：新消息');
     });
 });
 

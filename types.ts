@@ -775,6 +775,33 @@ export interface WorldRelationship {
     value: number;
 }
 
+/** 世界内消息（私聊/群聊通用）。fromId 可以是成员 charId 或 NPC id。 */
+export interface WorldChatMessage {
+    id: string;
+    fromId: string;
+    fromName: string;
+    text: string;
+    /** 发出时的轮数与剧情时间（手机 UI 按轮分隔显示） */
+    round: number;
+    storyTime: string;
+    timestamp: number;
+}
+
+/**
+ * 世界内消息线程。这是"手机是真手机"的落点：
+ * A 先演绎时发出的私聊/群聊立刻落线程，B 后演绎时就能在自己的手机上下文里
+ * 看到并回应——消息跨角色、跨轮交替传递，而不是各自的独白。
+ */
+export interface WorldThread {
+    /** dm 线程 id = 'dm_' + 两个 charId 排序后拼接；群聊 = 'group_main' */
+    id: string;
+    kind: 'dm' | 'group';
+    /** 群聊名（dm 不用） */
+    name?: string;
+    memberIds: string[];
+    messages: WorldChatMessage[];
+}
+
 /** 一个"世界"的完整定义（IndexedDB worlds 表）。 */
 export interface WorldProfile {
     id: string;
@@ -787,6 +814,8 @@ export interface WorldProfile {
     npcs: WorldNPC[];
     houses: WorldHouse[];
     relationships: WorldRelationship[];
+    /** 世界内消息线程（私聊 + 世界群聊），随演绎累积，每线程截留最近若干条 */
+    threads?: WorldThread[];
     /** 每天离线 tick 的时段（早/午/晚），空数组 = 仅手动观测推进 */
     offlineTickSlots?: ('morning' | 'noon' | 'evening')[];
     /** 剧情时钟：累计推进的半天数（0 = 第1天白天） */
@@ -811,11 +840,15 @@ export interface WorldCharBeat {
     mood: string;
     /** 数值面板（体力/心情值/自定义键） */
     statusPanel?: Record<string, number | string>;
-    /** 手机内容 */
+    /** 手机内容（dms/group 会立刻落进 world.threads，链内后续角色与下一轮都能收到） */
     phone?: {
         posts?: string[];
         dms?: { to: string; lines: string[] }[];
+        /** 发到世界群聊的话 */
+        group?: string[];
     };
+    /** 当面对在场成员说的话（不是手机）——对话对象的演绎轮里会完整听到并被要求回应 */
+    dialogues?: { with: string; lines: string[] }[];
     /** 本轮产出的关系变化（按名字回填到 world.relationships） */
     relationshipDeltas?: { withName: string; delta: number; reason?: string }[];
 }
@@ -852,6 +885,8 @@ export interface WorldCardMeta {
     narrative?: string;
     statusPanel?: Record<string, number | string>;
     phonePosts?: string[];
+    /** 发到世界群聊的话 */
+    phoneGroup?: string[];
 }
 
 /** 邮局：一封信收到的回复（留档用）。 */
