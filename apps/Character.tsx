@@ -1002,12 +1002,7 @@ ${isInitialGeneration ? `
                                            className="w-9 h-9 rounded-full bg-white/60 border border-white/50 shadow-sm flex items-center justify-center text-slate-500 disabled:opacity-30 active:scale-90 transition-all">
                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                                        </button>
-                                       <div className="flex items-center gap-1.5">
-                                           {Array.from({ length: totalPages }).map((_, i) => (
-                                               <button key={i} onClick={() => setCharPage(i)}
-                                                   className={`rounded-full transition-all ${i === page ? 'w-5 h-2 bg-slate-500' : 'w-2 h-2 bg-slate-300 hover:bg-slate-400'}`} />
-                                           ))}
-                                       </div>
+                                       <span className="text-sm text-slate-500 font-medium tabular-nums min-w-[40px] text-center">{page + 1}/{totalPages}</span>
                                        <button onClick={() => setCharPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1}
                                            className="w-9 h-9 rounded-full bg-white/60 border border-white/50 shadow-sm flex items-center justify-center text-slate-500 disabled:opacity-30 active:scale-90 transition-all">
                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" /></svg>
