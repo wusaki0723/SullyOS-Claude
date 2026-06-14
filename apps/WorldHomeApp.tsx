@@ -660,6 +660,135 @@ const ImpulseCard: React.FC<{
     );
 };
 
+/**
+ * 一个住户「这半天」的折叠卡。
+ * 默认只露脸：小人 + 名字 + 心情 + 一行剧透；点开才翻出完整正文/时间轴/对话/备忘/状态，
+ * 免得一展开小屋就被一整面墙的正文糊脸（更像翻一本小书的某一页）。
+ */
+const ResidentDayCard: React.FC<{
+    char: CharacterProfile;
+    beat?: WorldCharBeat;
+    t: any;
+    world: WorldProfile;
+    onPhone: () => void;
+    onDirective: (impulseText: string, text: string) => void;
+}> = ({ char, beat: b, t, world, onPhone, onDirective }) => {
+    const [open, setOpen] = useState(false);
+    if (!b) {
+        return (
+            <div className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 ${t.panelSolid}`}>
+                <ChibiFigure char={char} size={30} />
+                <span className={`text-[11px] ${t.textSub}`}>{char.name} 这半天还没有故事</span>
+                <button onClick={onPhone} className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform shrink-0">
+                    <DeviceMobile size={11} weight="fill" />手机
+                </button>
+            </div>
+        );
+    }
+    const teaser = (b.timeline?.find(tl => tl.shared)?.event) || b.narrative.replace(/\s+/g, ' ').trim().slice(0, 30);
+    const hasDirective = !!(world.directives || []).find(d => d.charId === b.charId);
+    return (
+        <div className={`rounded-xl border overflow-hidden ${t.panelSolid}`}>
+            {/* 露脸条：可点开/收起 + 看手机 */}
+            <div className="flex items-stretch">
+                <button onClick={() => setOpen(o => !o)} className="flex-1 min-w-0 text-left flex items-center gap-2 px-2 py-2">
+                    <div className="rounded-lg px-1 pt-1 shrink-0" style={{ background: t.lawnBg }}><ChibiFigure char={char} size={36} bob={open} /></div>
+                    <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                            <span className={`text-[12px] font-black ${t.textMain}`}>{b.charName}</span>
+                            <span className="text-[8.5px] font-bold px-1.5 py-0.5 rounded-full bg-amber-400/20 text-amber-600 border border-amber-400/30">{b.mood}</span>
+                            {b.impulse && <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-violet-400/20 text-violet-500 border border-violet-400/30 flex items-center gap-0.5"><Sparkle size={8} weight="fill" />{hasDirective ? '心声已传' : '有心事'}</span>}
+                        </div>
+                        <div className={`text-[10px] truncate mt-0.5 flex items-center gap-1 ${t.textSub}`}>
+                            <MapPin size={9} weight="fill" className="text-amber-500 shrink-0" />{b.location} · {teaser}{teaser.length >= 30 ? '…' : ''}
+                        </div>
+                    </div>
+                    {open ? <CaretDown size={14} className={`${t.textSub} self-center shrink-0`} /> : <CaretRight size={14} className={`${t.textSub} self-center shrink-0`} />}
+                </button>
+                <button onClick={onPhone} className={`shrink-0 px-2.5 flex items-center justify-center border-l ${t.divider}`} title="看 ta 的手机">
+                    <DeviceMobile size={15} weight="fill" className="text-amber-500" />
+                </button>
+            </div>
+
+            {open && (
+                <div className={`px-2.5 pb-2.5 pt-1 border-t ${t.divider} space-y-2.5`}>
+                    {/* 时间轴（shared=false 只有玩家看得到，标"没声张"） */}
+                    {b.timeline && b.timeline.length > 0 && (
+                        <div className={`mt-2 rounded-xl border p-2.5 ${t.chip}`}>
+                            <div className="text-[9px] font-black tracking-wider opacity-60 mb-1.5">这半天的时间轴</div>
+                            <div className="space-y-1.5">
+                                {b.timeline.map((tl, i) => (
+                                    <div key={i} className="flex gap-2 items-baseline">
+                                        <span className="text-[9.5px] font-black text-amber-500 w-9 shrink-0 text-right">{tl.time}</span>
+                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 translate-y-[-1px] ${tl.shared ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                                        <span className={`text-[11px] leading-snug ${t.textMain} opacity-85`}>
+                                            <b>{tl.place}</b> · {tl.event}
+                                            {!tl.shared && <span className="ml-1 inline-flex items-center gap-0.5 text-[8.5px] font-black text-rose-400"><EyeSlash size={9} weight="bold" />没声张</span>}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    {/* 正文：像翻开一页日记 */}
+                    <div className={`rounded-xl border p-3 ${t.chip}`}>
+                        <div className="text-[9px] font-black tracking-wider opacity-50 mb-1.5 flex items-center gap-1"><Article size={10} weight="fill" />ta 的这一天</div>
+                        <div className="space-y-2">
+                            {b.narrative.split(/\n+/).filter(Boolean).map((para, i) => (
+                                <p key={i} className={`text-[12.5px] leading-[1.85] tracking-[0.01em] ${t.textMain} opacity-90`} style={{ textIndent: '2em' }}>{para}</p>
+                            ))}
+                        </div>
+                    </div>
+                    {b.dialogues && b.dialogues.length > 0 && (
+                        <div className="space-y-1.5">
+                            {b.dialogues.map((d, i) => (
+                                <div key={i} className="rounded-lg border-l-2 border-amber-400/70 bg-amber-400/10 px-2.5 py-1.5">
+                                    <div className="text-[9px] font-black text-amber-600 mb-0.5">当面对 {d.with} 说</div>
+                                    {d.lines.map((l, j) => <div key={j} className={`text-[11.5px] leading-[1.6] ${t.textMain} opacity-90`}>「{l}」</div>)}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {/* 备忘录（私人，仅玩家可见） */}
+                    {b.memo && b.memo.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                            {b.memo.map((m, i) => (
+                                <div key={i} className="px-2.5 py-1.5 rounded-lg bg-amber-100 border border-amber-200 text-[10.5px] leading-snug text-amber-900 shadow-sm max-w-full"
+                                    style={{ transform: `rotate(${i % 2 === 0 ? '-0.6' : '0.5'}deg)` }}>
+                                    <NotePencil size={9} weight="fill" className="inline mr-1 text-amber-500" />{m}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {/* 冲动 / 待决策（user 可帮忙拿主意） */}
+                    {b.impulse && (
+                        <ImpulseCard
+                            impulse={b.impulse}
+                            existing={(world.directives || []).find(d => d.charId === b.charId)}
+                            textMain={t.textMain}
+                            onSend={text => onDirective(b.impulse!.text, text)}
+                        />
+                    )}
+                    {b.statusPanel && (
+                        <div className="grid grid-cols-2 gap-1.5">
+                            {Object.entries(b.statusPanel).map(([k, v]) => (
+                                <div key={k} className={`rounded-lg px-2 py-1.5 border ${t.chip}`}>
+                                    <div className="flex justify-between text-[9px] font-bold opacity-80"><span>{k}</span><span>{String(v)}</span></div>
+                                    {typeof v === 'number' && (
+                                        <div className={`h-1 rounded-full mt-1 overflow-hidden ${t.barTrack}`}>
+                                            <div className="h-full rounded-full" style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: 'linear-gradient(90deg,#34d399,#fbbf24)' }} />
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 // ============================================================
 // 大世界视图
 // ============================================================
@@ -923,102 +1052,18 @@ const WorldView: React.FC<{
                                         </div>
                                     </button>
                                     {open && (
-                                        <div className={`px-3 pb-3 space-y-2.5 border-t ${t.divider}`}>
-                                            {residents.map(r => {
-                                                const b = beatOf(r.id);
-                                                if (!b) {
-                                                    return (
-                                                        <div key={r.id} className={`flex items-center gap-2 text-[11px] px-1 pt-2.5 ${t.textSub}`}>
-                                                            <span>{r.name} 这半天还没有故事，先观测一轮。</span>
-                                                            <button onClick={() => setPhoneView({ ownerId: r.id })}
-                                                                className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform shrink-0">
-                                                                <DeviceMobile size={11} weight="fill" />手机
-                                                            </button>
-                                                        </div>
-                                                    );
-                                                }
-                                                return (
-                                                    <div key={r.id} className={`mt-2.5 rounded-xl border p-3 ${t.panelSolid}`}>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={`flex items-center gap-1 text-[11px] font-black ${t.textMain}`}>
-                                                                <MapPin size={11} weight="fill" className="text-amber-500" />{b.charName} 在{b.location}
-                                                            </span>
-                                                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-400/20 text-amber-600 border border-amber-400/30">{b.mood}</span>
-                                                            <button onClick={() => setPhoneView({ ownerId: r.id })}
-                                                                className="ml-auto flex items-center gap-1 text-[9.5px] font-black px-2 py-1 rounded-lg bg-slate-900 text-white shadow active:scale-95 transition-transform shrink-0">
-                                                                <DeviceMobile size={11} weight="fill" />看手机
-                                                            </button>
-                                                        </div>
-                                                        {/* 时间轴（shared=false 只有玩家看得到，标"没声张"） */}
-                                                        {b.timeline && b.timeline.length > 0 && (
-                                                            <div className={`mt-2.5 rounded-xl border p-2.5 ${t.chip}`}>
-                                                                <div className="text-[9px] font-black tracking-wider opacity-60 mb-1.5">这半天的时间轴</div>
-                                                                <div className="space-y-1.5">
-                                                                    {b.timeline.map((tl, i) => (
-                                                                        <div key={i} className="flex gap-2 items-baseline">
-                                                                            <span className="text-[9.5px] font-black text-amber-500 w-9 shrink-0 text-right">{tl.time}</span>
-                                                                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 translate-y-[-1px] ${tl.shared ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-                                                                            <span className={`text-[11px] leading-snug ${t.textMain} opacity-85`}>
-                                                                                <b>{tl.place}</b> · {tl.event}
-                                                                                {!tl.shared && <span className="ml-1 inline-flex items-center gap-0.5 text-[8.5px] font-black text-rose-400"><EyeSlash size={9} weight="bold" />没声张</span>}
-                                                                            </span>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                        <div className="mt-2 space-y-2">
-                                                            {b.narrative.split(/\n+/).filter(Boolean).map((para, i) => (
-                                                                <p key={i} className={`text-[12.5px] leading-[1.85] tracking-[0.01em] ${t.textMain} opacity-90`} style={{ textIndent: '2em' }}>{para}</p>
-                                                            ))}
-                                                        </div>
-                                                        {b.dialogues && b.dialogues.length > 0 && (
-                                                            <div className="mt-2.5 space-y-1.5">
-                                                                {b.dialogues.map((d, i) => (
-                                                                    <div key={i} className="rounded-lg border-l-2 border-amber-400/70 bg-amber-400/10 px-2.5 py-1.5">
-                                                                        <div className="text-[9px] font-black text-amber-600 mb-0.5">当面对 {d.with} 说</div>
-                                                                        {d.lines.map((l, j) => <div key={j} className={`text-[11.5px] leading-[1.6] ${t.textMain} opacity-90`}>「{l}」</div>)}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                        {/* 备忘录（私人，仅玩家可见） */}
-                                                        {b.memo && b.memo.length > 0 && (
-                                                            <div className="mt-2.5 flex flex-wrap gap-1.5">
-                                                                {b.memo.map((m, i) => (
-                                                                    <div key={i} className="px-2.5 py-1.5 rounded-lg bg-amber-100 border border-amber-200 text-[10.5px] leading-snug text-amber-900 shadow-sm max-w-full"
-                                                                        style={{ transform: `rotate(${i % 2 === 0 ? '-0.6' : '0.5'}deg)` }}>
-                                                                        <NotePencil size={9} weight="fill" className="inline mr-1 text-amber-500" />{m}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                        {/* 冲动 / 待决策（user 可帮忙拿主意） */}
-                                                        {b.impulse && (
-                                                            <ImpulseCard
-                                                                impulse={b.impulse}
-                                                                existing={(world.directives || []).find(d => d.charId === b.charId)}
-                                                                textMain={t.textMain}
-                                                                onSend={text => sendDirective(b.charId, b.impulse!.text, text)}
-                                                            />
-                                                        )}
-                                                        {b.statusPanel && (
-                                                            <div className="mt-2.5 grid grid-cols-2 gap-1.5">
-                                                                {Object.entries(b.statusPanel).map(([k, v]) => (
-                                                                    <div key={k} className={`rounded-lg px-2 py-1.5 border ${t.chip}`}>
-                                                                        <div className="flex justify-between text-[9px] font-bold opacity-80"><span>{k}</span><span>{String(v)}</span></div>
-                                                                        {typeof v === 'number' && (
-                                                                            <div className={`h-1 rounded-full mt-1 overflow-hidden ${t.barTrack}`}>
-                                                                                <div className="h-full rounded-full" style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: 'linear-gradient(90deg,#34d399,#fbbf24)' }} />
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
+                                        <div className={`px-2.5 pb-2.5 pt-1 space-y-2 border-t ${t.divider}`}>
+                                            {residents.map(r => (
+                                                <ResidentDayCard
+                                                    key={r.id}
+                                                    char={r}
+                                                    beat={beatOf(r.id)}
+                                                    t={t}
+                                                    world={world}
+                                                    onPhone={() => setPhoneView({ ownerId: r.id })}
+                                                    onDirective={(impulseText, text) => sendDirective(r.id, impulseText, text)}
+                                                />
+                                            ))}
                                         </div>
                                     )}
                                 </div>

@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useOS } from '../../context/OSContext';
+import { AppID } from '../../types';
 import type { PixelHomeState, PixelHomeViewMode, PixelAsset, PlacedFurniture } from './types';
 import type { MemoryRoom } from '../../utils/memoryPalace/types';
 import { getOrCreateHomeState, PixelLayoutDB, PixelAssetDB } from './pixelHomeDb';
@@ -38,7 +39,7 @@ interface Props {
 }
 
 const PixelHomeView: React.FC<Props> = ({ charId, charName, charAvatar, userName, onBack }) => {
-  const { addToast, apiConfig, characters, userProfile, remoteVectorConfig } = useOS();
+  const { addToast, apiConfig, characters, userProfile, remoteVectorConfig, openApp } = useOS();
   const char = characters.find(c => c.id === charId);
   const [viewMode, setViewMode] = useState<PixelHomeViewMode>('map');
   const [homeState, setHomeState] = useState<PixelHomeState | null>(null);
@@ -288,12 +289,33 @@ const PixelHomeView: React.FC<Props> = ({ charId, charName, charAvatar, userName
       {/* 主内容区 */}
       <div className="flex-1 overflow-hidden relative">
         {viewMode === 'map' && (
-          <PixelHomeMap homeState={homeState} assets={assets}
-            charSprite={pixelCharSprite || charAvatar} userName={userName} onEnterRoom={handleEnterRoom}
-            onUpdateTheme={async theme => {
-              setHomeState(prev => prev ? { ...prev, theme } : prev);
-              try { await DB.saveAsset(`pixel_home_theme_${charId}`, JSON.stringify(theme)); } catch {}
-            }} />
+          <>
+            <PixelHomeMap homeState={homeState} assets={assets}
+              charSprite={pixelCharSprite || charAvatar} userName={userName} onEnterRoom={handleEnterRoom}
+              onUpdateTheme={async theme => {
+                setHomeState(prev => prev ? { ...prev, theme } : prev);
+                try { await DB.saveAsset(`pixel_home_theme_${charId}`, JSON.stringify(theme)); } catch {}
+              }} />
+            {/* 家园传送门：从小小窝走进「同世界观多角色共同生活」的大世界 */}
+            <button
+              onClick={() => openApp(AppID.WorldHome)}
+              className="absolute bottom-4 right-4 z-20 group active:scale-95 transition-transform"
+              title="家园 · 走进大世界"
+              style={{ imageRendering: 'pixelated' }}>
+              <div className="relative flex flex-col items-center">
+                <div className="w-14 h-16 rounded-t-[1.6rem] rounded-b-md border-[3px] border-amber-900/80 shadow-[0_6px_0_rgba(0,0,0,.35),inset_0_2px_6px_rgba(255,255,255,.25)] overflow-hidden"
+                  style={{ background: 'linear-gradient(180deg,#6d4326 0%,#7c4a28 60%,#5a3620 100%)' }}>
+                  {/* 门里透出的星空 */}
+                  <div className="absolute inset-1.5 rounded-t-[1.3rem] rounded-b-sm overflow-hidden" style={{ background: 'linear-gradient(180deg,#1b2347 0%,#2c3a6b 70%,#3a4d7a 100%)' }}>
+                    <div className="absolute inset-0 animate-pulse" style={{ backgroundImage: 'radial-gradient(1px 1px at 30% 30%,#fff,transparent),radial-gradient(1px 1px at 65% 50%,#ffe9b0,transparent),radial-gradient(1px 1px at 45% 70%,#cfe2ff,transparent)' }} />
+                  </div>
+                  {/* 门把手 */}
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-amber-300 shadow z-10" />
+                </div>
+                <span className="mt-1 text-[9px] font-black tracking-wide text-amber-50 px-2 py-0.5 rounded-full bg-amber-900/80 shadow">家园</span>
+              </div>
+            </button>
+          </>
         )}
         {viewMode === 'room' && (
           <PixelRoomEditor charId={charId} charName={charName}
