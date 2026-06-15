@@ -134,14 +134,40 @@ const splitTextForTts = (rawText: string, maxChunkLen = 120): string[] => {
     return arr;
   }).filter(Boolean);
 };
-const renderAssistantLine = (text: string) => {
-  const trimmed = text.trim();
-  // Split by narration cues（…）AND newlines, treat cues as block elements
-  const parts = trimmed.split(/(（[^（）\n]{1,48}）|\n)/g).filter(Boolean);
+// 语气词标签 → 展示用的图标 + 中文小标签（把朗读用的 (sighs) 渲染成好看的徽章）
+const SOUND_TAG_META: Record<string, { icon: string; zh: string }> = {
+  chuckle: { icon: '😏', zh: '轻笑' }, laughs: { icon: '😄', zh: '笑' },
+  sighs: { icon: '😮‍💨', zh: '叹气' }, coughs: { icon: '😷', zh: '咳' },
+  'clear-throat': { icon: '😤', zh: '清嗓' }, groans: { icon: '😣', zh: '哼唧' },
+  breath: { icon: '🌬️', zh: '换气' }, pant: { icon: '😮‍💨', zh: '喘' },
+  inhale: { icon: '🫁', zh: '吸气' }, exhale: { icon: '🌬️', zh: '呼气' },
+  gasps: { icon: '😲', zh: '倒吸气' }, sniffs: { icon: '👃', zh: '吸鼻' },
+  snorts: { icon: '😆', zh: '喷笑' }, 'lip-smacking': { icon: '😋', zh: '咂嘴' },
+  humming: { icon: '🎵', zh: '哼唱' }, hissing: { icon: '😬', zh: '嘶' },
+  emm: { icon: '🤔', zh: '嗯' },
+};
+const SOUND_TAG_NAMES = Object.keys(SOUND_TAG_META).join('|');
+const SOUND_TAG_SPLIT_RE = new RegExp(`(（[^（）\\n]{1,48}）|\\((?:${SOUND_TAG_NAMES})\\)|\\n)`, 'gi');
+const renderAssistantLine = (text: string, accent = '#8b5cf6') => {
+  // 朗读用的停顿标记 <#0.4#> 不显示出来
+  const trimmed = text.replace(/<#[\d.]+#>/g, '').trim();
+  // 按 中文舞台指示（…）、英文语气词标签 (sighs)、换行 切分，前两者作为特殊元素渲染
+  const parts = trimmed.split(SOUND_TAG_SPLIT_RE).filter(Boolean);
   return parts.map((part, idx) => {
     if (part === '\n') return <div key={`br-${idx}`} className="h-2" />;
-    const isCue = /^（[^（）\n]{1,48}）$/.test(part);
-    if (isCue) return <div key={`cue-${idx}`} className="text-violet-300/95 italic my-1.5 text-[0.85em]">{part}</div>;
+    const soundMatch = part.match(new RegExp(`^\\((${SOUND_TAG_NAMES})\\)$`, 'i'));
+    if (soundMatch) {
+      const meta = SOUND_TAG_META[soundMatch[1].toLowerCase()];
+      return (
+        <span key={`snd-${idx}`} className="inline-flex items-center gap-0.5 align-middle mx-0.5 px-1.5 py-[1px] rounded-full text-[0.72em] font-medium"
+          style={{ background: `${accent}26`, color: accent, border: `1px solid ${accent}40` }}>
+          <span>{meta.icon}</span><span className="opacity-90">{meta.zh}</span>
+        </span>
+      );
+    }
+    if (/^（[^（）\n]{1,48}）$/.test(part)) {
+      return <div key={`cue-${idx}`} className="text-violet-300/95 italic my-1.5 text-[0.85em]">{part}</div>;
+    }
     return <React.Fragment key={`t-${idx}`}>{part}</React.Fragment>;
   });
 };
@@ -216,6 +242,14 @@ const buildCallPrompt = (userName: string, charName?: string, coreContext?: stri
    **整段回复里这种标签最多一两个**，多了声音会飘、很假。
 
 注意：不要写小说式中文旁白，如”（我靠在椅背上，目光看向远方）”——会被直接删掉，等于白写。
+
+### 说话的节奏（重要）
+
+你的文字会被原样转成语音，**标点就是停顿**。真人说话有呼吸、有顿挫，不会一口气赶到底。所以：
+- 该断句就断句，多用逗号、句号；该停顿、犹豫的地方大胆用”……”。
+- 想要一个明显的停顿（比如说重点前、叹气后、欲言又止），直接写 \`<#0.4#>\` 这种标记，数字是秒数（0.2~0.8 之间）。例：\`我想了想……<#0.6#>算了，还是告诉你吧。\`
+- 别把一长串话挤成没有标点的一整句——那样听起来像机器人在抢话。
+- \`<#秒#>\` 只在真正需要停顿的地方用，别每句都塞。
 
 ### 底线
 
@@ -1045,7 +1079,7 @@ const CallApp: React.FC = () => {
               <div className="text-sm mt-1 leading-relaxed">{(() => {
                 if (item.role !== 'assistant') return item.text;
                 const { display, voiceText } = extractVoiceTag(item.text);
-                return <>{display}{voiceText && <div className="mt-1 text-[10px] text-white/40 italic">{voiceText}</div>}</>;
+                return <>{renderAssistantLine(display, accentColor)}{voiceText && <div className="mt-1 text-[10px] text-white/40 italic">{voiceText}</div>}</>;
               })()}</div>
               {!!item.audioUrl && <button onClick={() => playAudio(item.audioUrl)} className="mt-2 text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/60 transition hover:bg-white/15">重播语音</button>}
             </div>
@@ -1204,7 +1238,7 @@ const CallApp: React.FC = () => {
               {bubble.role === 'assistant' ? (() => {
                 const { display, voiceText } = extractVoiceTag(line || bubble.text);
                 return <>
-                  {renderAssistantLine(display)}
+                  {renderAssistantLine(display, accentColor)}
                   {voiceText && <div className="mt-1 text-[11px] text-white/45 italic">{voiceText}</div>}
                 </>;
               })() : (line || bubble.text)}

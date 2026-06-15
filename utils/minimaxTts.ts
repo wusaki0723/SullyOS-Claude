@@ -115,25 +115,25 @@ export const parseVoiceOutput = (raw: string): ParsedVoiceOutput => {
 export const insertSpeechBreaks = (text: string): string => {
   if (!text) return '';
   return text
-    // 省略号：欲言又止 / 犹豫（适度，过长会显得卡顿）
-    .replace(/[…]{2,}/g, '……<#0.30#>')          // 多个省略号连用，稍长
-    .replace(/[…]/g, '…<#0.25#>')               // 单个省略号
-    .replace(/\.{3,}/g, '...<#0.25#>')           // 英文省略号
+    // 省略号：欲言又止 / 犹豫
+    .replace(/[…]{2,}/g, '……<#0.45#>')          // 多个省略号连用，更长
+    .replace(/[…]/g, '…<#0.35#>')               // 单个省略号
+    .replace(/\.{3,}/g, '...<#0.35#>')           // 英文省略号
     // 破折号：话题转折、语气拉长
-    .replace(/——/g, '——<#0.15#>')
-    .replace(/--/g, '--<#0.15#>')
-    // 句末标点：正常句子结束
-    .replace(/([。])/g, '$1<#0.10#>')
-    .replace(/([！？!?])/g, '$1<#0.12#>')        // 感叹/疑问稍长一点点
-    // 句中标点：轻微换气
-    .replace(/([，,])/g, '$1<#0.05#>')
-    .replace(/([、；;：:])/g, '$1<#0.04#>')
+    .replace(/——/g, '——<#0.22#>')
+    .replace(/--/g, '--<#0.22#>')
+    // 句末标点：句子之间留出真实呼吸（别让角色一口气赶完）
+    .replace(/([。])/g, '$1<#0.22#>')
+    .replace(/([！？!?])/g, '$1<#0.26#>')        // 感叹/疑问停顿更明显
+    // 句中标点：换气
+    .replace(/([，,])/g, '$1<#0.10#>')
+    .replace(/([、；;：:])/g, '$1<#0.07#>')
     // 换行：段落间停顿
-    .replace(/\n/g, '\n<#0.18#>')
-    // 去重：相邻多个停顿标签只保留最长的那个（封顶 0.35s）
+    .replace(/\n/g, '\n<#0.30#>')
+    // 去重：相邻多个停顿标签只保留最长的那个（封顶 0.6s）
     .replace(/(<#[\d.]+#>[\s]*){2,}/g, (match) => {
       const times = [...match.matchAll(/<#([\d.]+)#>/g)].map(m => parseFloat(m[1]));
-      const maxTime = Math.min(Math.max(...times), 0.35);
+      const maxTime = Math.min(Math.max(...times), 0.6);
       return `<#${maxTime.toFixed(2)}#>`;
     })
     .trim();

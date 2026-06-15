@@ -43,10 +43,10 @@ describe('parseVoiceOutput', () => {
 });
 
 describe('insertSpeechBreaks', () => {
-  it('caps pause length at 0.35s and inserts pause markers', () => {
+  it('caps pause length at 0.6s and inserts pause markers', () => {
     const out = insertSpeechBreaks('真的吗……好吧。');
     expect(out).toMatch(/<#0\.\d+#>/);
     const maxPause = Math.max(...[...out.matchAll(/<#([\d.]+)#>/g)].map(m => parseFloat(m[1])));
-    expect(maxPause).toBeLessThanOrEqual(0.35);
+    expect(maxPause).toBeLessThanOrEqual(0.6);
   });
 });
