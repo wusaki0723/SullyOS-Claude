@@ -14,7 +14,7 @@ import { formatMessageWithTime, formatMessageForPrompt } from '../utils/messageF
 import { DEFAULT_ARCHIVE_PROMPTS } from '../components/chat/ChatConstants';
 import ImpressionPanel from '../components/character/ImpressionPanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
-import { safeFetchJson, extractContent } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { normalizeUserImpression } from '../utils/impression';
@@ -55,7 +55,7 @@ const CharacterCard: React.FC<{
 );
 
 const Character: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, apiConfig, addToast, userProfile, customThemes, addCustomTheme, worldbooks, addWorldbook } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, apiConfig, agentRuntimeConfig, addToast, userProfile, customThemes, addCustomTheme, worldbooks, addWorldbook } = useOS();
   const [view, setView] = useState<'list' | 'detail'>('list');
   const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个）
   const [detailTab, setDetailTab] = useState<'identity' | 'memory' | 'impression'>('identity');
@@ -320,7 +320,7 @@ const Character: React.FC = () => {
   };
   
   const handleRefineMonth = async (year: string, month: string, rawText: string, formattedPrompt?: string) => {
-      if (!apiConfig.apiKey) { addToast('请先配置 API Key', 'error'); return; }
+      if (!agentRuntimeConfig.agentServerUrl?.trim()) { addToast('请先配置 Agent Server URL', 'error'); return; }
       if (!formData) return;
 
       const targetId = formData.id; // LOCK ID
@@ -348,32 +348,25 @@ const Character: React.FC = () => {
           : `${taskPreamble}\n\n### 角色视角（仅供写作口吻参考）\n${identityContext}### 详细规则\n以该角色的第一人称写作，使用与日记相同的语言（中文），输出一段精简的月度核心记忆。`;
       const userContent = rawText;
 
-      const refineUrl = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
       const t0 = performance.now();
       try {
-          const data = await safeFetchJson(refineUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-              body: JSON.stringify({
-                  model: apiConfig.model,
-                  messages: [
-                      { role: 'system', content: systemContent },
-                      { role: 'user', content: userContent },
-                  ],
-                  temperature: 0.3,
-              })
-          }, 0);
+          const summary = await sendAgentText(agentRuntimeConfig, {
+              userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+              charId: `${formData.id}-memory-refine`,
+              conversationId: `${formData.id}-memory-refine`,
+              systemPrompt: systemContent,
+              prompt: userContent,
+              appName: '角色',
+              purpose: '月度记忆精炼',
+              charName: formData.name,
+              userName: userProfile.name,
+              temperature: 0.3,
+              maxTurns: 1,
+              permissionPreset: 'chat-only',
+          });
           const dt = Math.round(performance.now() - t0);
-          const summary = extractContent(data);
           if (!summary) {
-              // 失败时留一条诊断 warn：Gemini 3.1 preview 在某些 prompt 下会静默拒答
-              // （completion_tokens=0，代理回 "Token count: N" stub），这些信息能帮
-              // 之后快速确认是不是同一个坑复发
-              const msg = data?.choices?.[0]?.message;
-              const rawContent = typeof msg?.content === 'string' ? msg.content : '';
-              const finishReason = data?.choices?.[0]?.finish_reason;
-              console.warn(`🧠 [Refine ${year}-${month}] 模型返回空: dt=${dt}ms finish=${finishReason} content.length=${rawContent.length} preview=${rawContent.slice(0, 120)} usage=`, data?.usage);
-              addToast(`精炼失败: 模型返回为空 (${dt}ms, finish=${finishReason || 'n/a'})，详情见控制台`, 'error');
+              addToast(`精炼失败: Agent 返回为空 (${dt}ms)`, 'error');
               return;
           }
           const key = `${year}-${month}`;
@@ -406,7 +399,7 @@ const Character: React.FC = () => {
    *                        没提供则退回到当前 selectedPromptId
    */
   const handleForceArchiveDate = async (dateStr: string, overridePromptId?: string): Promise<void> => {
-      if (!apiConfig.apiKey || !formData) { addToast('请先配置 API Key', 'error'); return; }
+      if (!agentRuntimeConfig.agentServerUrl?.trim() || !formData) { addToast('请先配置 Agent Server URL', 'error'); return; }
       const targetId = formData.id;
       try {
           const allMsgs = await DB.getMessagesByCharId(targetId, true);
@@ -433,12 +426,21 @@ const Character: React.FC = () => {
           prompt = prompt.replace(/\$\{userProfile\.name\}/g, userProfile.name);
           prompt = prompt.replace(/\$\{rawLog.*?\}/g, rawLog.substring(0, 200000));
 
-          const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-              body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.5, max_tokens: 8000, stream: false }),
-          }, 0);
-          let summary = extractContent(data).replace(/^["']|["']$/g, '');
+          let summary = await sendAgentText(agentRuntimeConfig, {
+              userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+              charId: `${targetId}-memory-archive`,
+              conversationId: `${targetId}-memory-archive`,
+              prompt,
+              systemPrompt: '你是 SullyOS 的角色记忆归档助手。只输出归档摘要正文，不要解释任务。',
+              appName: '角色',
+              purpose: '单日记忆重总结',
+              charName: formData.name,
+              userName: userProfile.name,
+              temperature: 0.5,
+              maxTurns: 1,
+              permissionPreset: 'chat-only',
+          });
+          summary = summary.replace(/^["']|["']$/g, '');
           if (!summary) throw new Error('空响应');
 
           // upsert：同日期的 mood='archive' 替换；'palace' 自动归档不碰
@@ -487,7 +489,7 @@ const Character: React.FC = () => {
   const handleWebFileDownload = () => { const fileName = `${formData?.name || 'character'}_memories.txt`; const blob = new Blob([exportText], { type: 'text/plain' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); addToast('已触发浏览器下载', 'success'); };
   
   const handleImportMemories = async () => { 
-      if (!importText.trim() || !apiConfig.apiKey) { addToast('请检查输入内容或 API 设置', 'error'); return; } 
+      if (!importText.trim() || !agentRuntimeConfig.agentServerUrl?.trim()) { addToast('请检查输入内容或 Agent Server 设置', 'error'); return; }
       if (!formData) return;
       
       const targetId = formData.id; // LOCK ID
@@ -496,8 +498,20 @@ const Character: React.FC = () => {
       
       try { 
           const prompt = `Task: Convert this text log into a JSON array. Format: [{ "date": "YYYY-MM-DD", "summary": "...", "mood": "..." }] Text: ${importText.substring(0, 8000)}`; 
-          const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` }, body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.1 }) }, 0);
-          let content = extractContent(data);
+          let content = await sendAgentText(agentRuntimeConfig, {
+              userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+              charId: `${targetId}-memory-import`,
+              conversationId: `${targetId}-memory-import`,
+              prompt,
+              systemPrompt: '你是 SullyOS 的记忆导入清洗器。严格输出 JSON array，不要解释任务。',
+              appName: '角色',
+              purpose: '导入记忆清洗',
+              charName: formData.name,
+              userName: userProfile.name,
+              temperature: 0.1,
+              maxTurns: 1,
+              permissionPreset: 'chat-only',
+          });
           content = content.replace(/```json/g, '').replace(/```/g, '').trim(); 
           const firstBracket = content.indexOf('['); 
           const lastBracket = content.lastIndexOf(']'); 
@@ -523,7 +537,7 @@ const Character: React.FC = () => {
   };
   
   const handleBatchSummarize = async () => {
-        if (!apiConfig.apiKey || !formData) return;
+        if (!agentRuntimeConfig.agentServerUrl?.trim() || !formData) return;
         
         const targetId = formData.id; // LOCK ID
         setIsBatchProcessing(true);
@@ -572,24 +586,27 @@ const Character: React.FC = () => {
                 prompt = prompt.replace(/\$\{userProfile\.name\}/g, userProfile.name);
                 prompt = prompt.replace(/\$\{rawLog.*?\}/g, rawLog.substring(0, 200000));
 
-                let data: any = null;
+                let summary = '';
                 try {
-                    data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                        body: JSON.stringify({
-                            model: apiConfig.model,
-                            messages: [{ role: "user", content: prompt }],
-                            max_tokens: 8000,
-                            temperature: 0.5
-                        })
-                    }, 0);
+                    summary = await sendAgentText(agentRuntimeConfig, {
+                        userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                        charId: `${targetId}-memory-batch`,
+                        conversationId: `${targetId}-memory-batch`,
+                        prompt,
+                        systemPrompt: '你是 SullyOS 的角色记忆批量归档助手。只输出归档摘要正文，不要解释任务。',
+                        appName: '角色',
+                        purpose: '批量记忆总结',
+                        charName: formData.name,
+                        userName: userProfile.name,
+                        temperature: 0.5,
+                        maxTurns: 1,
+                        permissionPreset: 'chat-only',
+                    });
                 } catch {
                     // 单天失败软跳过，继续后面的日期（与原 if(response.ok) 的语义一致）
                 }
 
-                if (data) {
-                    let summary = extractContent(data);
+                if (summary) {
                     summary = summary.replace(/^["']|["']$/g, '').trim();
 
                     if (summary) {
@@ -642,8 +659,8 @@ const Character: React.FC = () => {
     };
 
   const handleGenerateImpression = async (type: 'initial' | 'update') => {
-      if (!formData || !apiConfig.apiKey) {
-          addToast('请先配置 API Key', 'error');
+      if (!formData || !agentRuntimeConfig.agentServerUrl?.trim()) {
+          addToast('请先配置 Agent Server URL', 'error');
           return;
       }
       
@@ -758,22 +775,20 @@ ${isInitialGeneration ? `
 }
 注意：observed_changes 的每一项必须是纯字符串（string），例如 ["最近变得更开朗了", "开始主动分享日常"]。严禁使用对象格式如 {"period": "...", "description": "..."}。`;
 
-          const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-              body: JSON.stringify({
-                  model: apiConfig.model,
-                  messages: [{ role: "user", content: prompt }],
-                  max_tokens: 8000,
-                  temperature: 0.5,
-                  // 印象 prompt 体量大（含完整上下文 + 记忆 + 近期聊天），非流式下要等
-                  // 整段思考链 + JSON 全生成完才返回首字节，常超 60s 撞上中转站空闲超时被
-                  // 掐断（NetworkError）。开流式让连接持续有数据，绕开空闲超时；
-                  // safeResponseJson 会把 SSE 流拼回完整对象，下游 extractContent 无需改动。
-                  stream: true
-              })
-          }, 0);
-          let content = extractContent(data);
+          let content = await sendAgentText(agentRuntimeConfig, {
+              userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+              charId: `${targetId}-impression`,
+              conversationId: `${targetId}-impression`,
+              prompt,
+              systemPrompt: '你是 SullyOS 的私密印象档案生成器。严格输出 JSON，不要解释任务。',
+              appName: '角色',
+              purpose: '私密印象档案',
+              charName,
+              userName: userProfile.name,
+              temperature: 0.5,
+              maxTurns: 1,
+              permissionPreset: 'chat-only',
+          });
 
           content = content.replace(/```json/g, '').replace(/```/g, '').trim();
           const parsed = normalizeUserImpression(JSON.parse(content));

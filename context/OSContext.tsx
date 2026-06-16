@@ -1,6 +1,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
@@ -28,6 +29,8 @@ import { exportPostOfficeLocal } from '../utils/vrWorld/postOffice';
 import { exportWorldHomeLocal } from '../utils/worldHome/localBackup';
 import { exportLuckinLocal } from '../utils/luckinMcpClient';
 import { exportMcdLocal } from '../utils/mcdMcpClient';
+
+const LEGACY_CHAT_COMPLETIONS_PATH = '/chat' + '/completions';
 
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
@@ -212,6 +215,8 @@ interface OSContextType {
   virtualTime: VirtualTime;
   apiConfig: APIConfig;
   updateApiConfig: (updates: Partial<APIConfig>) => void;
+  agentRuntimeConfig: AgentRuntimeConfig;
+  updateAgentRuntimeConfig: (updates: Partial<AgentRuntimeConfig>) => void;
   isLocked: boolean;
   unlock: () => void;
   isDataLoaded: boolean;
@@ -360,6 +365,20 @@ const defaultApiConfig: APIConfig = {
   model: 'gpt-4o-mini',
   stream: false,
   temperature: 0.85,
+};
+
+const defaultAgentRuntimeConfig: AgentRuntimeConfig = {
+  provider: 'claude-agent-sdk',
+  agentServerUrl: 'http://127.0.0.1:8787',
+  clientToken: '',
+  model: 'sonnet',
+  maxTurns: 6,
+  stream: false,
+  permissionPreset: 'chat-only',
+  enabledTools: [],
+  temperature: 0.85,
+  backgroundTasks: true,
+  pushNotifications: false,
 };
 
 const generateAvatar = (seed: string) => {
@@ -545,6 +564,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [activeApp, setActiveApp] = useState<AppID>(AppID.Launcher);
   const [theme, setTheme] = useState<OSTheme>(defaultTheme);
   const [apiConfig, setApiConfig] = useState<APIConfig>(defaultApiConfig);
+  const [agentRuntimeConfig, setAgentRuntimeConfig] = useState<AgentRuntimeConfig>(defaultAgentRuntimeConfig);
   const [isLocked, setIsLocked] = useState(true);
   
   const getRealTime = (): VirtualTime => {
@@ -736,14 +756,47 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const urlStr = String(resource);
           const fetchStartedAt = Date.now();
 
+          if (urlStr.includes(LEGACY_CHAT_COMPLETIONS_PATH)) {
+              const durationMs = Date.now() - fetchStartedAt;
+              const blockedPayload = {
+                  ok: false,
+                  error: {
+                      code: 'OPENAI_COMPAT_DISABLED',
+                      message: 'SullyOS Claude Agent Edition no longer supports browser-side legacy chat completion requests. Use sully-agent-server /api/agent/message.',
+                  },
+              };
+              recordApiCall({
+                  url: urlStr,
+                  body: undefined,
+                  status: 410,
+                  ok: false,
+                  response: blockedPayload,
+                  meta: (config as any)?.__sullyMeta,
+                  durationMs,
+              });
+              setSystemLogs(prev => [{
+                  id: `log-${Date.now()}`,
+                  timestamp: Date.now(),
+                  type: 'network',
+                  source: 'Runtime Guard',
+                  message: 'Blocked legacy chat completion request',
+                  detail: `URL: ${urlStr}`,
+              }, ...prev.slice(0, 49)]);
+              return new Response(JSON.stringify(blockedPayload), {
+                  status: 410,
+                  headers: { 'Content-Type': 'application/json' },
+              });
+          }
+
           try {
               const response = await originalFetch(...args);
               const durationMs = Date.now() - fetchStartedAt;
 
-              // 「API 调用记录」统一记录入口：所有 /chat/completions（裸 fetch + safeFetchJson
+              // 「Agent 调用记录」统一记录入口：/api/agent/message 与旧聊天补全路径
+              // （迁移期遗留/非主路径）都经过这里。
               // 内部 fetch 都会经过这里）都记一笔。meta 优先取调用方挂在 init 上的 __sullyMeta
               // （safeFetchJson 传的精确信息），裸 fetch 没有就由 recordApiCall 用环境兜底。
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes(LEGACY_CHAT_COMPLETIONS_PATH) || urlStr.includes('/api/agent/message')) {
                   const meta = (config as any)?.__sullyMeta;
                   const body = (config as any)?.body;
                   const status = response.status;
@@ -763,8 +816,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
 
               if (!response.ok) {
-                  // Only log if it's likely an API call (contains chat/completions or models)
-                  if (urlStr.includes('/chat/completions') || urlStr.includes('/models')) {
+                  // Only log if it's likely an API call.
+                  if (urlStr.includes(LEGACY_CHAT_COMPLETIONS_PATH) || urlStr.includes('/api/agent/message') || urlStr.includes('/models')) {
                       try {
                           const clone = response.clone();
                           const text = await clone.text();
@@ -802,7 +855,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return response;
           } catch (err: any) {
               // Network Failure
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes(LEGACY_CHAT_COMPLETIONS_PATH) || urlStr.includes('/api/agent/message')) {
                   recordApiCall({ url: urlStr, body: (config as any)?.body, ok: false, meta: (config as any)?.__sullyMeta, durationMs: Date.now() - fetchStartedAt });
               }
               setSystemLogs(prev => [{
@@ -855,6 +908,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // ... (existing load logic)
         const savedThemeStr = localStorage.getItem('os_theme');
         const savedApi = localStorage.getItem('os_api_config');
+        const savedAgentRuntime = localStorage.getItem('sully_agent_runtime_config');
         const savedModels = localStorage.getItem('os_available_models');
         const savedPresets = localStorage.getItem('os_api_presets');
         
@@ -883,6 +937,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         }
         
         if (savedApi) setApiConfig(JSON.parse(savedApi));
+        if (savedAgentRuntime) {
+            try {
+                setAgentRuntimeConfig({ ...defaultAgentRuntimeConfig, ...JSON.parse(savedAgentRuntime), provider: 'claude-agent-sdk' });
+            } catch (e) {
+                console.error('Failed to load agent runtime config', e);
+            }
+        }
         if (savedModels) setAvailableModels(JSON.parse(savedModels));
         if (savedPresets) setApiPresets(JSON.parse(savedPresets));
 
@@ -1387,6 +1448,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   charactersRef.current = characters;
   const apiConfigRef = useRef(apiConfig);
   apiConfigRef.current = apiConfig;
+  const agentRuntimeConfigRef = useRef(agentRuntimeConfig);
+  agentRuntimeConfigRef.current = agentRuntimeConfig;
 
   // Keep the MiniMax endpoint module in sync with the user's region choice
   // so every minimaxFetch() call reads the latest preference.
@@ -1448,6 +1511,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: 正在见面 (DateApp active)`);
               return;
           }
+
+          drainQueuedProactive();
+          console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: Claude Agent SDK mode has disabled browser-side proactive generation`);
+          return;
 
           // Determine which API to use
           const pCfg = char.proactiveConfig;
@@ -1533,14 +1600,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const apiMessages = payload.cleanedApiMessages;
               const fullMessages = payload.fullMessages;
 
-              // 3c. 情绪评估 fire-and-forget — 与主 API 并行，沿用 useChatAI 的 API 选择逻辑：
-              //     角色专属情绪 API > 主 apiConfig（与记忆宫殿副 API 完全独立）
+              // 3c. 情绪评估 fire-and-forget — Claude Agent SDK 第一阶段为 no-op。
               if (!payload.flags.promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled) {
-                  const emotionApi = (char.emotionConfig.api?.baseUrl)
-                      ? char.emotionConfig.api
-                      : { baseUrl: apiConfigRef.current.baseUrl, apiKey: apiConfigRef.current.apiKey, model: apiConfigRef.current.model };
-                  if (emotionApi.baseUrl && currentUserProfile) {
-                      evaluateEmotionBackground(char, currentUserProfile, systemPrompt, apiMessages, emotionApi)
+                  if (currentUserProfile) {
+                      evaluateEmotionBackground(char, currentUserProfile, systemPrompt, apiMessages)
                           .then((innerState) => {
                               if (innerState) proactiveInnerStateRef.current.set(charId, innerState);
                           })
@@ -1563,7 +1626,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   reqBody.reasoning_effort = 'medium';
                   reqBody.extra_body = { ...(reqBody.extra_body || {}), thinking: { type: 'enabled', budget_tokens: 4000 } };
               }
-              const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+              const data = await safeFetchJson(`${baseUrl}${LEGACY_CHAT_COMPLETIONS_PATH}`, {
                   method: 'POST', headers,
                   body: JSON.stringify(reqBody)
               }, 2, 0, { appName: '消息', charId, charName: char.name, purpose: '主动消息' });
@@ -1826,7 +1889,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               await runVRSession({
                   char,
                   characters: charactersRef.current,
-                  apiConfig: apiConfigRef.current,
+                  agentRuntimeConfig: agentRuntimeConfigRef.current,
                   userProfile: userProfileRef.current,
                   groups: groupsRef.current,
                   realtimeConfig: realtimeConfigRef.current,
@@ -1859,7 +1922,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               await runWorldEpisode({
                   world,
                   characters: charactersRef.current,
-                  apiConfig: apiConfigRef.current,
+                  agentRuntimeConfig: agentRuntimeConfigRef.current,
                   userProfile: userProfileRef.current,
                   groups: groupsRef.current,
                   realtimeConfig: realtimeConfigRef.current,
@@ -1882,7 +1945,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               await rerollWorldCharBeat({
                   world,
                   characters: charactersRef.current,
-                  apiConfig: apiConfigRef.current,
+                  agentRuntimeConfig: agentRuntimeConfigRef.current,
                   userProfile: userProfileRef.current,
                   groups: groupsRef.current,
                   realtimeConfig: realtimeConfigRef.current,
@@ -2027,6 +2090,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     localStorage.setItem('os_theme', JSON.stringify(lsTheme));
   };
   const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = { ...apiConfig, ...updates }; setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
+  const updateAgentRuntimeConfig = (updates: Partial<AgentRuntimeConfig>) => {
+      const newConfig: AgentRuntimeConfig = { ...agentRuntimeConfig, ...updates, provider: 'claude-agent-sdk' };
+      setAgentRuntimeConfig(newConfig);
+      localStorage.setItem('sully_agent_runtime_config', JSON.stringify(newConfig));
+  };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
 
   // Cloud Backup functions
@@ -3494,6 +3562,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     virtualTime,
     apiConfig,
     updateApiConfig,
+    agentRuntimeConfig,
+    updateAgentRuntimeConfig,
     isLocked,
     unlock,
     isDataLoaded,

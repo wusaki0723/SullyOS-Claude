@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { BankFullState, BankTransaction, SavingsGoal, ShopStaff, BankGuestbookItem, DollhouseState } from '../types';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import Modal from '../components/os/Modal';
 import BankShopScene from '../components/bank/BankShopScene';
@@ -51,7 +51,7 @@ const INITIAL_STATE: BankFullState = {
 };
 
 const BankApp: React.FC = () => {
-    const { closeApp, characters, addToast, apiConfig, userProfile } = useOS();
+    const { closeApp, characters, addToast, agentRuntimeConfig, userProfile } = useOS();
     const [state, setState] = useState<BankFullState>(INITIAL_STATE);
     const [transactions, setTransactions] = useState<BankTransaction[]>([]);
     const [dollhouseState, setDollhouseState] = useState<DollhouseState>(INITIAL_DOLLHOUSE);
@@ -500,7 +500,7 @@ const BankApp: React.FC = () => {
             addToast(`AP 不足 (需 ${COST})。去省钱吧！`, 'error');
             return;
         }
-        if (!apiConfig.apiKey) { addToast('需配置 API Key', 'error'); return; }
+        if (!agentRuntimeConfig.agentServerUrl.trim()) { addToast('请先配置 Agent Server', 'error'); return; }
 
         setIsRefreshingGuestbook(true);
         try {
@@ -546,15 +546,20 @@ ${previousGuestbook}
 ]
 `;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }] })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: userProfile.id || userProfile.name || 'local-user',
+                charId: `${randomChar.id}-bank-guestbook`,
+                conversationId: 'bank-guestbook',
+                prompt,
+                appName: '记账咖啡馆',
+                purpose: '访客留言生成',
+                charName: randomChar.name,
+                userName: userProfile.name,
+                temperature: 0.85,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                let jsonStr = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+            if (raw) {
+                let jsonStr = raw.replace(/```json/g, '').replace(/```/g, '').trim();
                 const result = JSON.parse(jsonStr);
 
                 const newEntries: BankGuestbookItem[] = result.map((item: any) => ({
@@ -791,7 +796,6 @@ ${previousGuestbook}
                         onDollhouseChange={persistDollhouseUpdate}
                         characters={characters}
                         userProfile={userProfile}
-                        apiConfig={apiConfig}
                         updateState={async (updater) => {
                             const nextState = { ...stateRef.current, shop: updater(stateRef.current.shop) };
                             stateRef.current = nextState;
@@ -860,7 +864,7 @@ ${previousGuestbook}
                             goals={state.goals}
                             currency={state.config.currencySymbol}
                             onDeleteTx={handleDeleteTransaction}
-                            apiConfig={apiConfig}
+                            agentRuntimeConfig={agentRuntimeConfig}
                             dailyBudget={state.config.dailyBudget}
                         />
                     </div>

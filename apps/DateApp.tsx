@@ -7,14 +7,14 @@ import { DatePrompts, ApiMessage } from '../utils/datePrompts';
 import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
 import type { PipelineResult } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import Modal from '../components/os/Modal';
 import DateSession from '../components/date/DateSession';
 import DateSettings from '../components/date/DateSettings';
 import { BookOpen } from '@phosphor-icons/react';
 
 const DateApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig } = useOS();
+    const { closeApp, characters, activeCharacterId, setActiveCharacterId, agentRuntimeConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig } = useOS();
 
     // 记忆宫殿（与聊天侧共用同一套上下文：同 charId、同高水位线）
     // 见面流也需要在 AI 回复后跑一次缓冲区检查 + 自动归档，否则只有"读"没有"写"。
@@ -96,20 +96,31 @@ const DateApp: React.FC = () => {
     const formatTime = () => `${virtualTime.hours.toString().padStart(2, '0')}:${virtualTime.minutes.toString().padStart(2, '0')}`;
 
     // peek / send / reroll 共用的 LLM 调用（提示词构建统一在 utils/datePrompts.ts）
-    const callLLM = async (messages: ApiMessage[], temperature: number): Promise<string> => {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages,
-                temperature,
-                stream: apiConfig.stream ?? false,
-            })
+    const callLLM = async (messages: ApiMessage[], temperature: number, targetChar?: CharacterProfile): Promise<string> => {
+        const taskChar = targetChar || char;
+        if (!taskChar) throw new Error('No char');
+        const systemPrompt = messages
+            .filter(m => m.role === 'system')
+            .map(m => String(m.content || ''))
+            .join('\n\n') || '你正在 SullyOS 的约会 App 中扮演角色。只输出角色在当前场景里的回复或场景文本。';
+        const prompt = messages
+            .filter(m => m.role !== 'system')
+            .map(m => `[${m.role}]: ${String(m.content || '')}`)
+            .join('\n\n') || systemPrompt;
+        return sendAgentText(agentRuntimeConfig, {
+            userId: (userProfile as any)?.id || userProfile?.name || 'local-user',
+            charId: `${taskChar.id}-date`,
+            conversationId: `${taskChar.id}-date`,
+            prompt,
+            systemPrompt,
+            appName: '约会',
+            purpose: '约会场景生成',
+            charName: taskChar.name,
+            userName: userProfile?.name,
+            temperature,
+            maxTurns: 1,
+            permissionPreset: 'chat-only',
         });
-        if (!response.ok) throw new Error('API Error');
-        const data = await safeResponseJson(response);
-        return data.choices[0].message.content;
     };
 
     // --- Resume / Start Logic ---
@@ -180,7 +191,7 @@ const DateApp: React.FC = () => {
                 allMsgs: msgs,
                 emojis,
             });
-            const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
+            const content = await callLLM(messages, agentRuntimeConfig.temperature ?? 0.85, c);
             setPeekStatus(content);
 
         } catch (e: any) {
@@ -199,10 +210,8 @@ const DateApp: React.FC = () => {
         if (!liveBefore?.memoryPalaceEnabled) return;
         const mpEmb = memoryPalaceConfig?.embedding;
         const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-        const mpLLM = (mpLLMConfigured?.baseUrl)
-            ? mpLLMConfigured
-            : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
-        if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM.baseUrl) return;
+        const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : null;
+        if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM?.baseUrl) return;
 
         const recentMsgs = await DB.getRecentMessagesByCharId(charForHook.id, 50);
         try {
@@ -266,7 +275,7 @@ const DateApp: React.FC = () => {
             }
             setMemoryPalaceStatus('');
         }
-    }, [memoryPalaceConfig, apiConfig, userProfile?.name, updateCharacter, addToast]);
+    }, [memoryPalaceConfig, userProfile?.name, updateCharacter, addToast]);
 
     // --- Session API Logic ---
     const handleSendMessage = async (text: string): Promise<string> => {
@@ -303,7 +312,7 @@ const DateApp: React.FC = () => {
             userText: text,
             variant: 'send',
         });
-        const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
+        const content = await callLLM(messages, agentRuntimeConfig.temperature ?? 0.85, char);
 
         // 3. Save AI Response
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
@@ -345,7 +354,7 @@ const DateApp: React.FC = () => {
             variant: 'reroll',
         });
         // Reroll 略调高温度求多样性，但绝不低于用户配置的基线。
-        const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
+        const content = await callLLM(messages, Math.max(agentRuntimeConfig.temperature ?? 0.85, 0.9), char);
 
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
 

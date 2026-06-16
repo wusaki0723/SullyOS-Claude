@@ -150,7 +150,9 @@ export interface VirtualTime {
 export type MinimaxRegion = 'domestic' | 'overseas';
 
 export interface APIConfig {
+  /** Deprecated for main chat in Claude Agent Edition. Kept for legacy imports and non-chat helper APIs. */
   baseUrl: string;
+  /** Deprecated for main chat. Do not store Anthropic API keys in the browser. */
   apiKey: string;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
@@ -1666,6 +1668,13 @@ export interface CharacterProfile {
   // Call (voice phone) — remembered translation language for this character
   callVoiceLang?: string;
 
+  agentRuntime?: {
+      sessionId?: string;
+      lastSessionResetAt?: number;
+      permissionPreset?: 'chat-only' | 'read-only-tools' | 'custom-tools';
+      enabledTools?: string[];
+  };
+
   // Cross-session guidebook insights: what char has discovered about user across games
   guidebookInsights?: string[];
 
@@ -2349,6 +2358,7 @@ export interface FullBackupData {
     version: number;
     theme?: OSTheme;
     apiConfig?: APIConfig;
+    agentRuntimeConfig?: import('./types/agentRuntime').AgentRuntimeConfig;
     instantPushConfig?: InstantPushConfig;
     pushVapid?: { vapidPublicKey: string; vapidPrivateKey: string; vapidEmail?: string; updatedAt?: number; };
     apiPresets?: ApiPreset[];

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     BankShopState, DollhouseState, DollhouseRoom, DollhouseSticker,
-    ShopStaff, CharacterProfile, UserProfile, APIConfig, RoomLayout
+    ShopStaff, CharacterProfile, UserProfile, RoomLayout
 } from '../../types';
 import {
     ROOM_LAYOUTS, WALLPAPER_PRESETS, FLOOR_PRESETS, STICKER_LIBRARY, INITIAL_DOLLHOUSE
@@ -56,7 +56,6 @@ interface Props {
     onDollhouseChange: (updater: DollhouseState | ((prev: DollhouseState) => DollhouseState)) => Promise<void>;
     characters: CharacterProfile[];
     userProfile: UserProfile;
-    apiConfig: APIConfig;
     updateState: (updater: (prev: BankShopState) => BankShopState) => Promise<void>;
     onStaffClick?: (staff: ShopStaff) => void;
     onOpenGuestbook: () => void;

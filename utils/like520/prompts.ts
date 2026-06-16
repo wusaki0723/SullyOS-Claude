@@ -999,7 +999,7 @@ async function callLike520LLM<T>(opts: CallOptions<T>): Promise<T> {
         console.log(`[520][${opts.label}] attempt ${attempt + 1}/${maxRetries + 1}`);
 
         try {
-            const response = await fetch(`${opts.apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${opts.apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

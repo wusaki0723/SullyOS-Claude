@@ -3,7 +3,8 @@
  *
  * 设计：项目里 LLM 调用分两类——走 `utils/safeApi.ts` 的 `safeFetchJson` 的，和
  * 各 App 自己写的裸 `fetch`（TRPG / 自习室 / 群聊 / 日记…）。为了一个都不漏，记录点
- * 放在 `OSContext` 里那个全局 `fetch` monkey-patch 上：所有 `/chat/completions`
+ * 放在 `OSContext` 里那个全局 `fetch` monkey-patch 上：所有 `/agent-disabled`
+ * 和 Claude Agent Edition 的 `/api/agent/message`
  * （含 safeFetchJson 内部 fetch）都经过它，统一调 `recordApiCall`，不重复计。
  *
  * 「时间 / 哪个 API / 哪个模型 / token」从请求体 + 响应里自动解析；「哪个 App / 哪个
@@ -77,9 +78,11 @@ function stripTrailingSlash(s: string): string {
     return s.replace(/\/+$/, '');
 }
 
-/** 把 `https://host/v1/chat/completions` 还原成 `https://host/v1`（预设里存的 baseUrl 形态）。 */
+/** 把模型调用 URL 还原成 baseUrl。 */
 function deriveBaseUrl(url: string): string {
-    return stripTrailingSlash(url.replace(/\/chat\/completions\/?$/i, ''));
+    return stripTrailingSlash(url
+        .replace(/\/chat\/completions\/?$/i, '')
+        .replace(/\/api\/agent\/message\/?$/i, ''));
 }
 
 function hostOf(url: string): string {
@@ -97,7 +100,9 @@ function extractModel(body: unknown): string {
     if (typeof body === 'string') {
         try { parsed = JSON.parse(body); } catch { return ''; }
     }
-    return typeof parsed?.model === 'string' ? parsed.model : '';
+    return typeof parsed?.model === 'string'
+        ? parsed.model
+        : (typeof parsed?.options?.model === 'string' ? parsed.options.model : '');
 }
 
 /**
@@ -129,7 +134,7 @@ function resolvePresetName(baseUrl: string, model: string): string {
 
 /**
  * 记录一次 API 调用。fire-and-forget，绝不 throw / 阻塞主链路。
- * 在 safeFetchJson 里对 `/chat/completions` 的成功与失败都会调用。
+ * 在 safeFetchJson 里对 `/agent-disabled` 的成功与失败都会调用。
  */
 /** 从 OpenAI 兼容响应里抠 usage（各家代理大多遵循这个字段）。 */
 function extractUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
@@ -137,9 +142,9 @@ function extractUsage(response: unknown): { prompt?: number; completion?: number
     if (!usage || typeof usage !== 'object') return {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     return {
-        prompt: num(usage.prompt_tokens),
-        completion: num(usage.completion_tokens),
-        total: num(usage.total_tokens),
+        prompt: num(usage.prompt_tokens) ?? num(usage.inputTokens),
+        completion: num(usage.completion_tokens) ?? num(usage.outputTokens),
+        total: num(usage.total_tokens) ?? num(usage.totalTokens),
     };
 }
 

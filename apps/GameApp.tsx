@@ -5,6 +5,7 @@ import { DB } from '../utils/db';
 import { GameSession, GameTheme, CharacterProfile, GameLog, GameActionOption, GameSummary } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { extractContent, extractJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import Modal from '../components/os/Modal';
 import { Planet, RocketLaunch, Lightning, LockSimple, DiceFive, Toolbox, FloppyDisk, ArrowsClockwise, DoorOpen } from '@phosphor-icons/react';
@@ -195,7 +196,7 @@ const GameMarkdown: React.FC<{ content: string, theme: any, customStyle?: { font
 };
 
 const GameApp: React.FC = () => {
-    const { closeApp, characters, userProfile, apiConfig, addToast, updateCharacter } = useOS();
+    const { closeApp, characters, userProfile, agentRuntimeConfig, addToast, updateCharacter } = useOS();
     const [view, setView] = useState<'lobby' | 'create' | 'play'>('lobby');
     const [games, setGames] = useState<GameSession[]>([]);
     const [activeGame, setActiveGame] = useState<GameSession | null>(null);
@@ -286,49 +287,20 @@ const GameApp: React.FC = () => {
 
     // --- Helper: Robust API Call ---
     const fetchGameAPI = async (prompt: string, maxTokens: number = 8000) => {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.9, 
-                max_tokens: maxTokens,
-                stream: false
-            })
+        const content = await sendAgentText(agentRuntimeConfig, {
+            userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+            charId: activeGame ? `${activeGame.id}-game` : 'game-master',
+            conversationId: activeGame ? `${activeGame.id}-game` : 'game-master',
+            prompt,
+            systemPrompt: '你是 SullyOS 的 TRPG 游戏主持人。严格按提示输出故事、选项或 JSON，不要解释任务。',
+            appName: '游戏',
+            purpose: '游戏主持',
+            userName: userProfile.name,
+            temperature: 0.9,
+            maxTurns: agentRuntimeConfig.maxTurns ?? 1,
+            permissionPreset: 'chat-only',
         });
-
-        if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
-
-        const text = await response.text();
-        let json: any;
-        try {
-            json = JSON.parse(text);
-        } catch {
-            // Try stripping "data: " prefix (common in proxy misconfigurations)
-            const cleaned = text.replace(/^data: /, '').trim();
-            try {
-                json = JSON.parse(cleaned);
-            } catch {
-                // Detect HTML responses
-                if (text.trimStart().startsWith('<')) {
-                    throw new Error('API返回了HTML而非JSON，请检查API地址是否正确');
-                }
-                throw new Error(`API返回了无法解析的格式: ${text.slice(0, 100)}`);
-            }
-        }
-
-        if (json.usage?.total_tokens) {
-            const usage = {
-                prompt: json.usage.prompt_tokens || undefined,
-                completion: json.usage.completion_tokens || undefined,
-                total: json.usage.total_tokens
-            };
-            setLastTokenUsage(usage);
-            setTotalTokensUsed(prev => prev + json.usage.total_tokens);
-        }
-
-        return json;
+        return { choices: [{ message: { content } }] };
     };
 
     // --- Helper: Build Synchronized Context (Neural Link) ---
@@ -421,8 +393,8 @@ ${recentLog}
 
     // --- AI 世界观生成 (帮想不出剧本的用户起一个设定) ---
     const handleGenerateWorld = async () => {
-        if (!apiConfig.apiKey) {
-            addToast('请先配置 API Key', 'error');
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) {
+            addToast('请先配置 Agent Server URL', 'error');
             return;
         }
         setIsGeneratingWorld(true);
@@ -461,8 +433,8 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
             return;
         }
         
-        if (!apiConfig.apiKey) {
-            addToast('请先配置 API Key 以生成序章', 'error');
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) {
+            addToast('请先配置 Agent Server URL 以生成序章', 'error');
             return;
         }
 
@@ -616,7 +588,7 @@ ${playerContext}
 
     // --- Gameplay Logic ---
     const handleAction = async (actionText: string, isReroll: boolean = false) => {
-        if (!activeGame || !apiConfig.apiKey) return;
+        if (!activeGame || !agentRuntimeConfig.agentServerUrl?.trim()) return;
 
         let contextLogs = activeGame.logs;
         let updatedGame = activeGame;

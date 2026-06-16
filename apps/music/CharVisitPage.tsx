@@ -52,7 +52,7 @@ const toPlaylistSong = (s: Song): CharPlaylistSong => ({
 });
 
 const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
-  const { characters, updateCharacter, userProfile, apiConfig, addToast } = useOS();
+  const { characters, updateCharacter, userProfile, agentRuntimeConfig, addToast } = useOS();
   const {
     cfg, playSong,
     current, playing, togglePlay, nextSong, prevSong,
@@ -99,7 +99,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     if (!char || initializing) return;
     setInitializing(true);
     try {
-      const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
+      const newProfile = await CharMusicPersona.initialize(char, userProfile, agentRuntimeConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐角落已开启`, 'success');
     } catch (e: any) {
@@ -107,7 +107,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     } finally {
       setInitializing(false);
     }
-  }, [char, initializing, userProfile, apiConfig, updateCharacter, addToast]);
+  }, [char, initializing, userProfile, agentRuntimeConfig, updateCharacter, addToast]);
 
   /** 清掉旧档案重新走一次 LLM —— 给旧版保底生成的"告五人"账号用。 */
   const doRegenerate = useCallback(async () => {
@@ -118,7 +118,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     if (!ok) return;
     setInitializing(true);
     try {
-      const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
+      const newProfile = await CharMusicPersona.initialize(char, userProfile, agentRuntimeConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐人格已重新生成`, 'success');
     } catch (e: any) {
@@ -126,7 +126,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     } finally {
       setInitializing(false);
     }
-  }, [char, initializing, userProfile, apiConfig, updateCharacter, addToast]);
+  }, [char, initializing, userProfile, agentRuntimeConfig, updateCharacter, addToast]);
 
   const togglePlaylist = (plId: string) => {
     setExpandedPl(prev => (prev === plId ? null : plId));

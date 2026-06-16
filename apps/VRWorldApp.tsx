@@ -15,8 +15,9 @@ import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vr
 import { decodeBytes } from '../utils/vrWorld/decodeText';
 import { stripLeakedAttrs } from '../utils/vrWorld/prompts';
 import { PostOffice, MAX_LETTER_CHARS, exportIdentity, importIdentity, getAdminToken, setAdminToken, type RemoteReply, type RemoteLetterStat, type RemoteAdminLetter } from '../utils/vrWorld/postOffice';
-import { getVRApi, setVRApi, getVRApiLog, clearVRApiLog, type VRApiCall } from '../utils/vrWorld/vrApi';
-import { safeResponseJson } from '../utils/safeApi';
+import { getVRApiLog, clearVRApiLog, type VRApiCall } from '../utils/vrWorld/vrApi';
+import { checkAgentHealth } from '../utils/agentClient';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 
 const genLocalId = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -66,7 +67,7 @@ const stripSelfName = (text: string | undefined, name: string | undefined): stri
     }
     return text;
 };
-import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VRCardMeta, VRRoomId, VRMusicRoomState, CharPlaylistSong, VRGuestbookState, VRGuestbookMessage, VRLetter, ApiPreset, APIConfig } from '../types';
+import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VRCardMeta, VRRoomId, VRMusicRoomState, CharPlaylistSong, VRGuestbookState, VRGuestbookMessage, VRLetter } from '../types';
 
 // ============ chibi 形象解析（vrState.chibi → 立绘 → 头像） ============
 import { getChibi } from '../utils/vrWorld/chibi';
@@ -101,7 +102,7 @@ const IDLE_QUIPS: Record<VRRoomId, string[]> = {
 };
 
 const VRWorldApp: React.FC = () => {
-    const { closeApp, characters, updateCharacter, addToast, registerBackHandler, userProfile, updateUserProfile, apiPresets, apiConfig } = useOS();
+    const { closeApp, characters, updateCharacter, addToast, registerBackHandler, userProfile, updateUserProfile, agentRuntimeConfig } = useOS();
     const userName = userProfile?.name || '我';
     const [tab, setTab] = useState<Tab>('world');
     const [novels, setNovels] = useState<VRWorldNovel[]>([]);
@@ -373,7 +374,7 @@ const VRWorldApp: React.FC = () => {
                             onRequestEnable={requestEnable} onEditChibi={setChibiEditChar} />
                     </div>
                 ) : (
-                    <VRApiSettings apiPresets={apiPresets} chatApi={apiConfig} addToast={addToast} />
+                    <VRApiSettings agentRuntimeConfig={agentRuntimeConfig} addToast={addToast} />
                 )}
             </div>
 
@@ -2551,44 +2552,27 @@ const SettingsView: React.FC<{
     );
 };
 
-// ============ 彼方 · API 设置 + 调用记录 ============
-const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; addToast?: (m: string, t?: any) => void }> = ({ apiPresets, chatApi, addToast }) => {
-    const [vrApi, setVr] = useState<APIConfig | null>(null);
+// ============ 彼方 · Agent Server 设置 + 调用记录 ============
+const VRApiSettings: React.FC<{ agentRuntimeConfig: AgentRuntimeConfig; addToast?: (m: string, t?: any) => void }> = ({ agentRuntimeConfig, addToast }) => {
     const [log, setLog] = useState<VRApiCall[]>([]);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<string | null>(null);
-    const [presetsOpen, setPresetsOpen] = useState(false);   // 折叠「保存的预设」长列表
 
     useEffect(() => {
-        void getVRApi().then(setVr);
         void getVRApiLog().then(setLog);
         const h = () => { void getVRApiLog().then(setLog); };
         window.addEventListener('vr-api-log', h);
         return () => window.removeEventListener('vr-api-log', h);
     }, []);
 
-    const follow = !vrApi?.baseUrl;
-    const effective = follow ? chatApi : vrApi!;
-    const sameAs = (c: APIConfig) => !follow && vrApi!.baseUrl === c.baseUrl && vrApi!.model === c.model && vrApi!.apiKey === c.apiKey;
     const host = (u?: string) => { try { return u ? new URL(u).host : '—'; } catch { return u || '—'; } };
 
-    const choose = (cfg: APIConfig | null) => {
-        void setVRApi(cfg); setVr(cfg); setTestResult(null);
-        addToast?.(cfg ? '已切换彼方 API' : '彼方改为跟随聊天默认', 'success');
-    };
-
     const test = async () => {
-        const cfg = effective;
-        if (!cfg?.baseUrl) { setTestResult('当前没有可用的 API'); return; }
+        if (!agentRuntimeConfig.agentServerUrl.trim()) { setTestResult('当前没有可用的 Agent Server'); return; }
         setTesting(true); setTestResult(null);
         try {
-            const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey || 'sk-none'}` },
-                body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5, stream: false }),
-            });
-            if (res.ok) { const d = await safeResponseJson(res); const r = d.choices?.[0]?.message?.content || ''; setTestResult(`连接成功 — 模型回复:"${r.slice(0, 24)}"`); }
-            else { const t = await res.text().catch(() => ''); setTestResult(`HTTP ${res.status}: ${t.slice(0, 80)}`); }
+            const ok = await checkAgentHealth(agentRuntimeConfig);
+            setTestResult(ok ? '连接成功 — Agent Server 在线' : '连接失败 — Agent Server 未就绪');
         } catch (e: any) { setTestResult(`连接失败: ${e.message}`); } finally { setTesting(false); }
     };
 
@@ -2597,65 +2581,19 @@ const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; add
     return (
         <div className="space-y-3">
             <p className="text-[11px] text-indigo-300/60 leading-relaxed">
-                彼方里的角色会自主、按间隔登入触发模型调用，比较费 API。你可以在这里给彼方<b className="text-indigo-200">单独指定一份 API</b>（和「设置」里保存的预设共用同一批），不设则跟随聊天默认。
+                彼方里的角色会自主、按间隔登入触发 Agent Server 调用。浏览器不保存模型密钥，所有 Claude Agent SDK 会话都由后端管理。
             </p>
 
             {/* 当前生效 */}
             <div className="rounded-2xl p-3.5" style={{ background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.08)' }}>
                 <div className="text-[10px] tracking-[0.2em] text-indigo-200/60 mb-1.5" style={{ fontFamily: `'Noto Serif SC',serif` }}>当前生效</div>
-                <div className="text-[12.5px] text-white/90 font-semibold">{effective?.model || '未配置'}</div>
-                <div className="text-[10px] text-white/40 mt-0.5">{host(effective?.baseUrl)} · {follow ? '跟随聊天默认' : '彼方独立'}</div>
+                <div className="text-[12.5px] text-white/90 font-semibold">{agentRuntimeConfig.model || 'Claude Agent SDK'}</div>
+                <div className="text-[10px] text-white/40 mt-0.5">{host(agentRuntimeConfig.agentServerUrl)} · Agent Server</div>
                 <button onClick={test} disabled={testing} className="mt-2.5 text-[11px] px-3 py-1.5 rounded-full font-semibold disabled:opacity-50"
                     style={{ background: 'rgba(120,180,255,.16)', color: '#bcd4ff', border: '1px solid rgba(140,180,255,.3)' }}>
                     {testing ? '测试中…' : '测试连接'}
                 </button>
                 {testResult && <div className={`mt-2 text-[10.5px] px-2.5 py-1.5 rounded-lg leading-snug ${testResult.startsWith('连接成功') ? 'text-emerald-300' : 'text-rose-300'}`} style={{ background: 'rgba(0,0,0,.25)' }}>{testResult}</div>}
-            </div>
-
-            {/* 选择 API */}
-            <div>
-                <div className="text-[10px] tracking-[0.2em] text-indigo-200/55 mb-1.5 px-0.5" style={{ fontFamily: `'Noto Serif SC',serif` }}>选择彼方 API</div>
-                <button onClick={() => choose(null)}
-                    className="w-full flex items-center gap-2 rounded-xl p-3 mb-1.5 text-left active:scale-[0.99] transition-transform"
-                    style={{ background: follow ? 'rgba(120,180,255,.12)' : 'rgba(255,255,255,.04)', border: `1px solid ${follow ? 'rgba(140,180,255,.4)' : 'rgba(255,255,255,.07)'}` }}>
-                    <div className="flex-1 min-w-0">
-                        <div className="text-[12px] text-white/90 font-semibold">跟随聊天默认</div>
-                        <div className="text-[10px] text-white/40 truncate">{chatApi?.model || '未配置'} · {host(chatApi?.baseUrl)}</div>
-                    </div>
-                    {follow && <span className="text-[10px] text-sky-300 font-bold shrink-0">✓ 使用中</span>}
-                </button>
-                {apiPresets.length === 0 ? (
-                    <p className="text-[10.5px] text-white/35 px-1 py-1.5">「设置」里还没有保存的 API 预设。去设置里保存几个模型，这里就能选。</p>
-                ) : (() => {
-                    const activePreset = apiPresets.find(p => sameAs(p.config));
-                    const shown = presetsOpen ? apiPresets : (activePreset ? [activePreset] : []);
-                    return (
-                        <>
-                            <button onClick={() => setPresetsOpen(o => !o)}
-                                className="w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 mb-1.5 text-left active:bg-white/5"
-                                style={{ border: '1px solid rgba(255,255,255,.07)' }}>
-                                <span className="text-[10.5px] text-white/55">保存的预设</span>
-                                <span className="text-[9.5px] text-white/35 rounded-full px-1.5 leading-tight" style={{ background: 'rgba(255,255,255,.08)' }}>{apiPresets.length}</span>
-                                {!presetsOpen && activePreset && <span className="text-[9.5px] text-sky-300/70 truncate">当前 · {activePreset.name}</span>}
-                                <span className="ml-auto text-[10px] text-white/40">{presetsOpen ? '收起' : '展开'}</span>
-                            </button>
-                            {shown.map(p => {
-                                const on = sameAs(p.config);
-                                return (
-                                    <button key={p.id} onClick={() => choose(p.config)}
-                                        className="w-full flex items-center gap-2 rounded-xl p-3 mb-1.5 text-left active:scale-[0.99] transition-transform"
-                                        style={{ background: on ? 'rgba(120,180,255,.12)' : 'rgba(255,255,255,.04)', border: `1px solid ${on ? 'rgba(140,180,255,.4)' : 'rgba(255,255,255,.07)'}` }}>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="text-[12px] text-white/90 font-semibold truncate">{p.name}</div>
-                                            <div className="text-[10px] text-white/40 truncate">{p.config.model} · {host(p.config.baseUrl)}</div>
-                                        </div>
-                                        {on && <span className="text-[10px] text-sky-300 font-bold shrink-0">✓ 使用中</span>}
-                                    </button>
-                                );
-                            })}
-                        </>
-                    );
-                })()}
             </div>
 
             {/* 调用记录 */}

@@ -2412,7 +2412,7 @@ export default function MemoryPalaceApp() {
                             setTestingLight(true);
                             setLightTestResult(null);
                             try {
-                                const res = await fetch(`${lightUrl.trim().replace(/\/+$/, '')}/chat/completions`, {
+                                const res = await fetch(`${lightUrl.trim().replace(/\/+$/, '')}/agent-disabled`, {
                                     method: 'POST',
                                     headers: {
                                         'Content-Type': 'application/json',

@@ -5,7 +5,8 @@ import { SongSheet, SongLine, SongComment, SongMood, SongGenre, SongAudio, Music
 import { SONG_GENRES, SONG_MOODS, SECTION_LABELS, COVER_STYLES, SongPrompts, LYRIC_TEMPLATES, getLyricTemplate } from '../utils/songPrompts';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { ContextBuilder } from '../utils/context';
-import { safeResponseJson, extractJson } from '../utils/safeApi';
+import { extractJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { DB } from '../utils/db';
 import {
     synthesizeSong,
@@ -13,7 +14,6 @@ import {
     buildAceStepLyrics,
     hashSongInputs,
     loadSongAudioBlob,
-    generatePromptViaLLM,
     VOICE_PRESETS,
     type AceStepInput,
 } from '../utils/aceStepApi';
@@ -76,7 +76,7 @@ function mkPendingItem(l: SongLine): TimelineItem { return { kind: 'pending', da
 // --- Main App ---
 
 const SongwritingApp: React.FC = () => {
-    const { closeApp, openApp, songs, addSong, updateSong, deleteSong, characters, apiConfig, addToast, userProfile } = useOS();
+    const { closeApp, openApp, songs, addSong, updateSong, deleteSong, characters, apiConfig, agentRuntimeConfig, addToast, userProfile } = useOS();
     const { addLocalSong, removeLocalSong, localAlbumSongs, playSong, current: currentMusicSong, markRegenerating } = useMusic();
 
     // Navigation
@@ -354,17 +354,21 @@ const SongwritingApp: React.FC = () => {
 
             apiMessages.push({ role: 'user', content: userPrompt });
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: apiMessages, temperature: 0.8, max_tokens: 2000 })
-            });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                if (data.usage?.total_tokens) setLastTokenUsage(data.usage.total_tokens);
-
-                const rawContent = data.choices[0].message.content.trim();
+            const rawContent = (await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${collaborator.id}-songwriting`,
+                conversationId: `${collaborator.id}-songwriting`,
+                systemPrompt,
+                prompt: apiMessages.filter(m => m.role !== 'system').map(m => `[${m.role}]: ${m.content}`).join('\n\n'),
+                appName: '写歌',
+                purpose: '歌词协作',
+                charName: collaborator.name,
+                userName: userProfile.name,
+                temperature: 0.8,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
+            })).trim();
+            if (rawContent) {
                 const parsed = extractJson(rawContent);
 
                 const newComments: SongComment[] = [];
@@ -608,18 +612,21 @@ const SongwritingApp: React.FC = () => {
 
         try {
             const prompt = SongPrompts.buildCompletionPrompt(collaborator, userProfile, activeSong);
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.7, max_tokens: 500 })
+            const review = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${collaborator.id}-songwriting`,
+                conversationId: `${collaborator.id}-songwriting`,
+                prompt,
+                systemPrompt: '你是 SullyOS 写歌 App 的协作导师。只输出评价正文，不要解释任务。',
+                appName: '写歌',
+                purpose: '完成度评价',
+                charName: collaborator.name,
+                userName: userProfile.name,
+                temperature: 0.7,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                setCompletionReview(data.choices[0].message.content.trim());
-            } else {
-                setCompletionReview('(评价生成失败，但不影响保存)');
-            }
+            setCompletionReview(review.trim() || '(评价生成失败，但不影响保存)');
         } catch {
             setCompletionReview('(网络错误，但不影响保存)');
         } finally {
@@ -1039,24 +1046,7 @@ const SongwritingApp: React.FC = () => {
 
     const handleAiWritePrompt = async () => {
         if (!activeSong) return;
-        if (!apiConfig.baseUrl || !apiConfig.apiKey) {
-            addToast('请先在「设置」里配置 LLM API', 'error');
-            return;
-        }
-        setIsAiWritingPrompt(true);
-        try {
-            // MiniMax 是中文模型 → 输出中文 natural-language prompt
-            // ACE-Step 国外模型 → 输出英文 comma-separated tags
-            const lang: 'en' | 'zh' = provider === 'ace-step' ? 'en' : 'zh';
-            const generated = await generatePromptViaLLM(promptGuidance.trim(), activeSong, apiConfig, collaborator, undefined, lang);
-            setPromptDraft(generated);
-            addToast(promptGuidance.trim() ? 'AI 已结合角色生成' : `AI 凭${collaborator?.name || '角色'}的气质写了一段`, 'success');
-        } catch (err: any) {
-            console.error('[ACE-Step] LLM prompt failed', err);
-            addToast(`生成失败: ${err?.message?.slice(0, 80) || err}`, 'error');
-        } finally {
-            setIsAiWritingPrompt(false);
-        }
+        addToast('Claude Agent SDK 模式暂不支持在浏览器侧自动生成音乐提示词，请先手写 tags/prompt。', 'info');
     };
 
     /** Reset draft tags back to whatever the preset+genre+mood combo would be. */

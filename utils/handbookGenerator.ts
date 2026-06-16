@@ -458,7 +458,7 @@ ${transcriptParts.join('\n\n')}
 直接输出 JSON 数组。`;
 
     try {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
             body: JSON.stringify({
@@ -700,7 +700,7 @@ text 里允许少量 markdown 语法,渲染时会变成对应的视觉效果:
 直接输出 JSON 数组。`;
 
     try {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
             body: JSON.stringify({

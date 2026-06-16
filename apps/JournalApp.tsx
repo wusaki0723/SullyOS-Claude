@@ -6,7 +6,7 @@ import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } 
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { normalizeMessageContent } from '../utils/messageFormat';
 import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
 import { getRoomLabel } from '../utils/memoryPalace/types';
@@ -45,7 +45,7 @@ const getLocalDateStr = () => {
 };
 
 const JournalApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig } = useOS();
+    const { closeApp, characters, activeCharacterId, agentRuntimeConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig } = useOS();
 
     const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
@@ -386,7 +386,7 @@ const JournalApp: React.FC = () => {
     // --- AI Interaction ---
 
     const handleExchange = async () => {
-        if (!currentEntry || !selectedChar || !apiConfig.apiKey) {
+        if (!currentEntry || !selectedChar || !agentRuntimeConfig.agentServerUrl?.trim()) {
             addToast('配置错误或内容为空', 'error');
             return;
         }
@@ -451,22 +451,20 @@ Structure:
   "stickers": ["sticker1", "http://custom-sticker-url..."] (从默认列表或 Custom Stickers 中选0-3个)
 }`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: `Users Diary:\n${currentEntry.userPage.text}` }
-                    ],
-                    temperature: 0.85
-                })
+            let content = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${selectedChar.id}-journal`,
+                conversationId: `${selectedChar.id}-journal`,
+                systemPrompt,
+                prompt: `Users Diary:\n${currentEntry.userPage.text}`,
+                appName: '日记',
+                purpose: '交换日记回复',
+                charName: selectedChar.name,
+                userName: userProfile.name,
+                temperature: agentRuntimeConfig.temperature ?? 0.85,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (!response.ok) throw new Error('API Error');
-            const data = await safeResponseJson(response);
-            let content = data.choices[0].message.content.trim();
             content = content.replace(/```json/g, '').replace(/```/g, '').trim();
             
             let parsed;
@@ -512,7 +510,7 @@ Structure:
     //   - 开了记忆宫殿: 走副 API extractMemoriesFromBuffer 一次提取多条 MemoryNode → 节点入宫,
     //     同一组节点 bullets 化拼成 MemoryFragment 写 char.memories (mood='diary_palace')。
     //     不再调主 API。神经链接里那条 bullets 跟宫殿节点严格一比一对应。
-    //   - 没开记忆宫殿 / 副 API 缺失 / 副 API 没提取出: 回落主 API + 升级 prompt 出 150~300 字
+    //   - 没开记忆宫殿 / 副 API 缺失 / 副 API 没提取出: 回落 Agent Server + 升级 prompt 出 150~300 字
     //     散文式总结 → 写 char.memories (mood='diary')。这条沿用老路径升级版。
     //
     // mood 用 'diary_palace' / 'diary' 跟 chatapp 自动归档的 'palace' 区分,
@@ -520,7 +518,7 @@ Structure:
     // 召回链路不看 mood,只是元数据 / UI 徽章,所以两种 mood 都正常进 chat 上下文。
     const handleArchiveDiary = async (diary: DiaryEntry) => {
         if (!selectedChar || diary.isArchived) return;
-        if (!apiConfig.apiKey) { addToast('请先配置主 API', 'error'); return; }
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) { addToast('请先配置 Agent Server URL', 'error'); return; }
         if (!diary.userPage.text.trim() && !diary.charPage?.text?.trim()) {
             addToast('日记内容为空,无法归档', 'info');
             return;
@@ -528,7 +526,7 @@ Structure:
 
         setArchivingId(diary.id);
 
-        // 主 API 散文式总结 — 当宫殿没开 / 副 API 缺失 / 提取为空时的 fallback
+        // Agent Server 散文式总结 — 当宫殿没开 / 副 API 缺失 / 提取为空时的 fallback
         const generateProseSummary = async (): Promise<string> => {
             const baseContext = ContextBuilder.buildCoreContext(selectedChar, userProfile);
             const charPart = diary.charPage?.text?.trim() || '(对方没有回复)';
@@ -558,19 +556,21 @@ ${charPart}
 3. **细节胜过抽象**: 多说具体的事 (人名、地点、物件、当时的情绪),少用"我们度过了美好的一天"这种空话。
 4. **篇幅**: 150~300 字之间的一段中文叙述,不要分段,不要列表,不要任何前缀和标题,直接出叙述。
 `;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature: 0.4,
-                    max_tokens: 1200,
-                }),
+            let s = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${selectedChar.id}-journal-archive`,
+                conversationId: `${selectedChar.id}-journal-archive`,
+                prompt,
+                systemPrompt: '你是 SullyOS 的交换日记归档助手。只输出长期记忆摘要正文，不要解释任务。',
+                appName: '日记',
+                purpose: '日记归档',
+                charName: selectedChar.name,
+                userName: userProfile.name,
+                temperature: 0.4,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-            if (!response.ok) throw new Error(`主 API 失败 (${response.status})`);
-            const data = await safeResponseJson(response);
-            let s = (data.choices?.[0]?.message?.content || '').trim();
+            s = (s || '').trim();
             s = s.replace(/^["'「『]|["'」』]$/g, '').trim();
             if (!s) throw new Error('归档总结为空');
             return s;

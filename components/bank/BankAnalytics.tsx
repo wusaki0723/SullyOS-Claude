@@ -1,14 +1,15 @@
 
 import React, { useMemo, useState, useEffect } from 'react';
-import { BankTransaction, SavingsGoal, APIConfig } from '../../types';
-import { safeResponseJson } from '../../utils/safeApi';
+import { BankTransaction, SavingsGoal } from '../../types';
+import { AgentRuntimeConfig } from '../../types/agentRuntime';
+import { sendAgentText } from '../../utils/agentClient';
 
 interface Props {
     transactions: BankTransaction[];
     goals: SavingsGoal[];
     currency: string;
     onDeleteTx: (id: string) => void;
-    apiConfig?: APIConfig;
+    agentRuntimeConfig: AgentRuntimeConfig;
     dailyBudget?: number;
 }
 
@@ -24,7 +25,7 @@ const CATEGORIES: Record<string, { icon: string; label: string; color: string; g
     other: { icon: 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f4e6.png', label: '其他', color: '#78909C', gradient: 'from-gray-400 to-slate-500' }
 };
 
-const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDeleteTx, apiConfig, dailyBudget = 100 }) => {
+const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDeleteTx, agentRuntimeConfig, dailyBudget = 100 }) => {
     const [viewMode, setViewMode] = useState<'today' | 'week' | 'month'>('today');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [categorizedTx, setCategorizedTx] = useState<Record<string, string>>({});
@@ -116,7 +117,7 @@ const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDelet
 
     // AI categorization and summary
     const analyzeWithAI = async () => {
-        if (!apiConfig?.apiKey || filteredTx.length === 0) return;
+        if (!agentRuntimeConfig.agentServerUrl.trim() || filteredTx.length === 0) return;
 
         setIsAnalyzing(true);
         try {
@@ -137,15 +138,18 @@ ${txList}
   "summary": "总结文字"
 }`;
 
-            const res = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }] })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: 'local-user',
+                charId: 'bank-analytics',
+                conversationId: 'bank-analytics',
+                prompt,
+                appName: '记账',
+                purpose: '消费分析',
+                temperature: 0.2,
+                permissionPreset: 'chat-only',
             });
-
-            if (res.ok) {
-                const data = await safeResponseJson(res);
-                let jsonStr = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+            if (raw) {
+                let jsonStr = raw.replace(/```json/g, '').replace(/```/g, '').trim();
                 const result = JSON.parse(jsonStr);
 
                 // Map categories to transaction IDs
@@ -267,7 +271,7 @@ ${txList}
                             </div>
                             <button
                                 onClick={analyzeWithAI}
-                                disabled={isAnalyzing || !apiConfig?.apiKey}
+                                disabled={isAnalyzing || !agentRuntimeConfig.agentServerUrl.trim()}
                                 className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                                     isAnalyzing
                                         ? 'bg-[#EFEBE9] text-[#BCAAA4]'

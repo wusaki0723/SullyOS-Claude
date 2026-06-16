@@ -4,7 +4,7 @@ import { DB } from '../utils/db';
 import { CharacterProfile, PhoneEvidence, PhoneCustomApp } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { User, Phone, ChatCircleDots, ShoppingBag, Hamburger, CircleNotch, Wrench, Compass, GearSix, Tray, Plus, SignOut } from '@phosphor-icons/react';
 
@@ -45,7 +45,7 @@ const LayoutInspector: React.FC = () => {
 };
 
 const CheckPhone: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, addToast, userProfile } = useOS();
+    const { closeApp, characters, activeCharacterId, updateCharacter, agentRuntimeConfig, addToast, userProfile } = useOS();
     const [view, setView] = useState<'select' | 'phone'>('select');
     // activeAppId: 'home' | 'chat_detail' | 'app_id'
     const [activeAppId, setActiveAppId] = useState<string>('home'); 
@@ -182,7 +182,7 @@ const CheckPhone: React.FC = () => {
     // --- Core Generation Logic ---
 
     const handleGenerate = async (type: string, customPrompt?: string) => {
-        if (!targetChar || !apiConfig.apiKey) {
+        if (!targetChar || !agentRuntimeConfig.agentServerUrl?.trim()) {
             addToast('配置错误', 'error');
             return;
         }
@@ -244,19 +244,20 @@ const CheckPhone: React.FC = () => {
 
             const fullPrompt = `${context}\n\n### [Current Status]\n时间距离上次互动: ${timeGap}\n\n### [Recent Chat Context]\n${recentMsgs}\n\n### [Task]\n${promptInstruction}\n请根据[Current Status]和人设调整生成内容的时间戳和情绪。如果很久没聊天，记录可能是近期的独处状态；如果刚聊过，记录可能与聊天内容相关。`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [{ role: "user", content: fullPrompt }],
-                    temperature: 0.8
-                })
+            let content = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${targetChar.id}-phone-check`,
+                conversationId: `${targetChar.id}-phone-check`,
+                prompt: fullPrompt,
+                systemPrompt: '你是 SullyOS 的查手机 App 数据生成器。严格按提示输出 JSON 或文本，不要解释任务。',
+                appName: '查手机',
+                purpose: '生成手机记录',
+                charName: targetChar.name,
+                userName: userProfile.name,
+                temperature: 0.8,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (!response.ok) throw new Error('API Error');
-            const data = await safeResponseJson(response);
-            let content = data.choices[0].message.content;
             content = content.replace(/```json/g, '').replace(/```/g, '').trim();
             const firstBracket = content.indexOf('[');
             const lastBracket = content.lastIndexOf(']');
@@ -321,7 +322,7 @@ const CheckPhone: React.FC = () => {
     // --- Continue Chat Logic ---
 
     const handleContinueChat = async () => {
-        if (!selectedChatRecord || !targetChar || !apiConfig.apiKey) return;
+        if (!selectedChatRecord || !targetChar || !agentRuntimeConfig.agentServerUrl?.trim()) return;
         setIsLoading(true);
 
         try {
@@ -344,19 +345,22 @@ Format:
 - Only output the new dialogue lines. Do NOT repeat history.
 `;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.85
-                })
+            let newLines = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${targetChar.id}-phone-check`,
+                conversationId: `${targetChar.id}-phone-check`,
+                prompt,
+                systemPrompt: '你是 SullyOS 的查手机 App 对话记录续写器。只输出新的对话行，不要解释任务。',
+                appName: '查手机',
+                purpose: '续写手机聊天记录',
+                charName: targetChar.name,
+                userName: userProfile.name,
+                temperature: 0.85,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                let newLines = data.choices[0].message.content.trim();
+            if (newLines) {
+                newLines = newLines.trim();
                 
                 // Clean up any markdown
                 newLines = newLines.replace(/```/g, '');

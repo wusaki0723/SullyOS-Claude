@@ -12,8 +12,9 @@
  * 成本：一卷 = 1 次额外 LLM 调用（不是 N 次），用最便宜的方式拿到全员视角。
  */
 
-import type { APIConfig, CharacterProfile, WorldProfile, WorldEpisode, WorldChapter, WorldCharBeat } from '../../types';
-import { safeFetchJson } from '../safeApi';
+import type { CharacterProfile, WorldProfile, WorldEpisode, WorldChapter, WorldCharBeat } from '../../types';
+import type { AgentRuntimeConfig } from '../../types/agentRuntime';
+import { sendAgentText } from '../agentClient';
 import { extractJson } from './prompts';
 
 /** 一天三段（早/中/晚），20 天结一卷。 */
@@ -129,7 +130,7 @@ export async function summarizeChapter(args: {
     world: WorldProfile;
     members: CharacterProfile[];
     episodes: WorldEpisode[];     // 本卷窗口内的原文（任意顺序）
-    api: { baseUrl: string; apiKey: string; model: string };
+    agentRuntimeConfig: AgentRuntimeConfig;
     fromClock: number;
     toClock: number;
     fromLabel: string;
@@ -137,21 +138,21 @@ export async function summarizeChapter(args: {
     index: number;
     prevSynopsis?: string;
 }): Promise<WorldChapter | null> {
-    const { world, members, episodes, api, fromClock, toClock, fromLabel, toLabel, index, prevSynopsis } = args;
+    const { world, members, episodes, agentRuntimeConfig, fromClock, toClock, fromLabel, toLabel, index, prevSynopsis } = args;
     if (episodes.length === 0) return null;
-    const baseUrl = api.baseUrl.replace(/\/+$/, '');
     const digest = buildChapterDigest(episodes);
     try {
-        const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` },
-            body: JSON.stringify({
-                model: api.model,
-                messages: [{ role: 'user', content: buildChapterSummaryPrompt({ world, members, fromLabel, toLabel, digest, prevSynopsis }) }],
-                temperature: 0.8, stream: false,
-            }),
-        }, 2, 0, { appName: '家园', purpose: `结卷总结 · ${world.name} 第${index}卷` });
-        const parsed = parseChapterSummary(data.choices?.[0]?.message?.content || '', members);
+        const content = await sendAgentText(agentRuntimeConfig, {
+            userId: 'local-user',
+            charId: `${world.id}-worldhome-chapter`,
+            conversationId: world.id,
+            prompt: buildChapterSummaryPrompt({ world, members, fromLabel, toLabel, digest, prevSynopsis }),
+            appName: '家园',
+            purpose: `结卷总结 · ${world.name} 第${index}卷`,
+            temperature: 0.8,
+            permissionPreset: 'chat-only',
+        });
+        const parsed = parseChapterSummary(content, members);
         // 每个角色这一卷「最后一天」的 beat：取窗口内 round 最大的那条 episode 里各自的 beat
         const lastEp = episodes.slice().sort((a, b) => b.round - a.round)[0];
         const lastDayBeats = lastEp?.beats || [];

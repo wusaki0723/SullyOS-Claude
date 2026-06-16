@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { CharacterProfile, GuidebookSession, GuidebookRound, GuidebookOption } from '../types';
 import { extractJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import {
     buildOpeningPrompt,
@@ -31,25 +33,21 @@ import {
 const genId = () => Math.random().toString(36).slice(2, 10);
 
 // --- Helper: API Call ---
-async function callAPI(apiConfig: { baseUrl: string; apiKey: string; model: string }, prompt: string): Promise<string> {
-    const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-        body: JSON.stringify({
-            model: apiConfig.model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.9,
-            max_tokens: 4000,
-            stream: false,
-        }),
+async function callAPI(agentRuntimeConfig: AgentRuntimeConfig, userName: string, char: CharacterProfile, prompt: string, purpose: string): Promise<string> {
+    return sendAgentText(agentRuntimeConfig, {
+        userId: userName || 'local-user',
+        charId: `${char.id}-guidebook`,
+        conversationId: `${char.id}-guidebook`,
+        prompt,
+        systemPrompt: '你是 SullyOS 的恋爱/互动攻略本主持人。严格按提示输出所需文本或 JSON，不要解释任务。',
+        appName: '攻略本',
+        purpose,
+        charName: char.name,
+        userName,
+        temperature: 0.9,
+        maxTurns: 1,
+        permissionPreset: 'chat-only',
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const text = await response.text();
-    let json: any;
-    try { json = JSON.parse(text); } catch {
-        json = JSON.parse(text.replace(/^data: /, '').trim());
-    }
-    return json?.choices?.[0]?.message?.content?.trim() || '';
 }
 
 // --- Helper: Fetch recent messages as text (uses char.contextLimit) ---
@@ -588,7 +586,7 @@ const SessionCard: React.FC<{
 
 // ===== MAIN APP =====
 const GuidebookApp: React.FC = () => {
-    const { closeApp, characters, userProfile, apiConfig, addToast, updateCharacter } = useOS();
+    const { closeApp, characters, userProfile, agentRuntimeConfig, addToast, updateCharacter } = useOS();
 
     // View State
     const [view, setView] = useState<'lobby' | 'setup' | 'opening' | 'playing' | 'replay'>('lobby');
@@ -705,7 +703,7 @@ const GuidebookApp: React.FC = () => {
         try {
             await injectMemoryPalace(char, undefined, scenarioHint || undefined);
             const prompt = buildOpeningPrompt(char, userProfile, initialAffinity, scenarioHint, 'manual', recentMsgs, char.guidebookInsights);
-            const raw = await callAPI(apiConfig, prompt);
+            const raw = await callAPI(agentRuntimeConfig, userProfile.name, char, prompt, '开场生成');
             let data = extractJson(raw);
 
             // Flexible segment extraction: try multiple paths
@@ -779,7 +777,7 @@ const GuidebookApp: React.FC = () => {
                 session.currentRound + 1, session.rounds, session.scenarioHint || '',
                 cachedRecentMsgs, wc, nextDirectionHint || undefined
             );
-            const raw = await callAPI(apiConfig, prompt);
+            const raw = await callAPI(agentRuntimeConfig, userProfile.name, selectedChar, prompt, '选项辅助');
             const data = extractJson(raw);
             // Flexible: try data.options, or any array field with 3+ items that have text
             let opts: any[] | null = null;
@@ -877,7 +875,7 @@ const GuidebookApp: React.FC = () => {
                 roundNum, session.maxRounds, options, session.rounds, session.scenarioHint || '',
                 cachedRecentMsgs, wc, nextDirectionHint || undefined, roundScenario || undefined
             );
-            const raw = await callAPI(apiConfig, prompt);
+            const raw = await callAPI(agentRuntimeConfig, userProfile.name, selectedChar, prompt, '回合推进');
             const data = extractJson(raw);
             const choice = data?.choice;
             // Accept number, string number, or letter A/B/C
@@ -953,7 +951,7 @@ const GuidebookApp: React.FC = () => {
                 session.initialAffinity, session.currentAffinity, session.rounds,
                 cachedRecentMsgs
             );
-            const raw = await callAPI(apiConfig, prompt);
+            const raw = await callAPI(agentRuntimeConfig, userProfile.name, selectedChar, prompt, '结算卡');
             const data = extractJson(raw);
 
             if (data) {

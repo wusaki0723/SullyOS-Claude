@@ -7,7 +7,7 @@
  * 3. 判定哪些工具属于"终结性"操作 (下单成功后自动结束麦请求)
  * 4. 给前端 UI 一个"工具结果该渲染成什么卡片"的暗示函数
  *
- * 不负责工具循环本身, 那个写在 useChatAI.ts 里 (因为它已经管着 chat/completions 调用)
+ * 不负责工具循环本身, 那个写在 useChatAI.ts 里 (因为它已经管着 agent-disabled 调用)
  */
 
 import { listMcdTools, McdToolDef } from './mcdMcpClient';

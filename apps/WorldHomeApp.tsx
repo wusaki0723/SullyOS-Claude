@@ -27,9 +27,10 @@ import { isWorldRunning } from '../utils/worldHome/engine';
 import { worldTimeLabel, isNightWorld, houseOf, NARRATIVE_STYLES, buildNpcRollPrompt, parseRolledNpcs, realObserveTarget } from '../utils/worldHome/prompts';
 import { SIM_CHAPTER_DAYS, SIM_CHAPTER_CLOCKS } from '../utils/worldHome/chapters';
 import { dmThreadsOf, groupThreadOf } from '../utils/worldHome/threads';
-import { safeFetchJson } from '../utils/safeApi';
-import { WORLD_API_KEY, WORLD_CUSTOM_STYLE_KEY } from '../utils/worldHome/localBackup';
-import type { WorldProfile, WorldEpisode, WorldHomeMode, WorldTimeMode, WorldHouse, WorldThread, WorldNarrativeStyle, CharacterProfile, WorldCharBeat, APIConfig, ApiPreset } from '../types';
+import { sendAgentText, checkAgentHealth } from '../utils/agentClient';
+import { WORLD_CUSTOM_STYLE_KEY } from '../utils/worldHome/localBackup';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
+import type { WorldProfile, WorldEpisode, WorldHomeMode, WorldTimeMode, WorldHouse, WorldThread, WorldNarrativeStyle, CharacterProfile, WorldCharBeat } from '../types';
 
 /** 自定义文风的本地收藏 / 家园全局 API 的 localStorage key —— 与备份工具共用同一组，避免漂移。 */
 const CUSTOM_STYLE_KEY = WORLD_CUSTOM_STYLE_KEY;
@@ -40,56 +41,48 @@ const persistSavedStyles = (list: string[]) => {
     try { localStorage.setItem(CUSTOM_STYLE_KEY, JSON.stringify(list.slice(0, 12))); } catch { /* ignore */ }
 };
 
-/** 家园全局 API（所有世界共用一份；不设=跟随全局聊天默认）。存 localStorage。 */
-const loadWorldApi = (): { baseUrl: string; apiKey: string; model: string } | null => {
-    try { const s = localStorage.getItem(WORLD_API_KEY); const c = s ? JSON.parse(s) : null; return c?.baseUrl ? c : null; } catch { return null; }
-};
-const persistWorldApi = (cfg: { baseUrl: string; apiKey: string; model: string } | null) => {
-    try { if (cfg?.baseUrl) localStorage.setItem(WORLD_API_KEY, JSON.stringify(cfg)); else localStorage.removeItem(WORLD_API_KEY); } catch { /* ignore */ }
-};
-
-/** 家园全局 API 设置弹窗（学彼方：跟随全局默认 / 选「设置」里保存的预设；所有世界共用）。 */
+/** 家园 Agent Server 状态弹窗。 */
 const WorldApiSettings: React.FC<{
-    apiConfig: APIConfig;
-    apiPresets: ApiPreset[];
-    current: { baseUrl: string; apiKey: string; model: string } | null;
-    onChoose: (cfg: { baseUrl: string; apiKey: string; model: string } | null) => void;
+    agentRuntimeConfig: AgentRuntimeConfig;
     onClose: () => void;
-}> = ({ apiConfig, apiPresets, current, onChoose, onClose }) => {
+}> = ({ agentRuntimeConfig, onClose }) => {
+    const [testing, setTesting] = useState(false);
+    const [testResult, setTestResult] = useState<string | null>(null);
     const host = (u?: string) => { try { return u ? new URL(u).host : '—'; } catch { return u || '—'; } };
-    const follow = !current?.baseUrl;
-    const sameAs = (c: APIConfig) => !follow && current!.baseUrl === c.baseUrl && current!.model === c.model && current!.apiKey === c.apiKey;
+    const test = async () => {
+        if (!agentRuntimeConfig.agentServerUrl.trim()) { setTestResult('尚未配置 Agent Server'); return; }
+        setTesting(true);
+        setTestResult(null);
+        try {
+            const ok = await checkAgentHealth(agentRuntimeConfig);
+            setTestResult(ok ? '连接成功，Agent Server 在线' : '连接失败，Agent Server 未就绪');
+        } catch (e: any) {
+            setTestResult(`连接失败: ${e?.message || String(e)}`);
+        } finally {
+            setTesting(false);
+        }
+    };
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={onClose}>
             <div className="w-full max-w-md bg-[#f7f3ea] rounded-3xl p-4 max-h-[80%] overflow-y-auto no-scrollbar shadow-2xl" onClick={e => e.stopPropagation()}>
                 <div className="flex items-center justify-between mb-1">
-                    <h3 className="text-[15px] font-black text-stone-800 font-serif">家园 · API</h3>
+                    <h3 className="text-[15px] font-black text-stone-800 font-serif">家园 · Agent Server</h3>
                     <button onClick={onClose} className="p-1.5 rounded-full hover:bg-black/5"><X size={16} weight="bold" className="text-stone-500" /></button>
                 </div>
-                <p className="text-[11px] text-stone-400 leading-relaxed mb-3">家园演绎比较费 API，可在这里单独指定一份（<b className="text-stone-500">所有世界共用</b>）；不设则跟随全局聊天默认。</p>
-                <button onClick={() => onChoose(null)} className={`w-full flex items-center gap-2 rounded-xl p-3 mb-1.5 text-left border transition-all ${follow ? 'bg-stone-900 border-stone-900 text-white shadow' : 'bg-white border-stone-200 text-stone-700'}`}>
-                    <div className="flex-1 min-w-0">
-                        <div className="text-[12.5px] font-bold">跟随全局默认</div>
-                        <div className={`text-[10px] truncate ${follow ? 'text-white/60' : 'text-stone-400'}`}>{apiConfig?.model || '未配置'} · {host(apiConfig?.baseUrl)}</div>
+                <p className="text-[11px] text-stone-400 leading-relaxed mb-3">家园演绎统一走全局 Claude Agent SDK 后端。浏览器端不保存模型密钥，也不再为单个世界指定 provider。</p>
+                <div className="w-full rounded-xl p-3 mb-1.5 text-left border bg-white border-stone-200 text-stone-700">
+                    <div className="text-[12.5px] font-bold">{agentRuntimeConfig.model || 'Claude Agent SDK'}</div>
+                    <div className="text-[10px] truncate text-stone-400">{host(agentRuntimeConfig.agentServerUrl)} · Agent Server</div>
+                    <button onClick={test} disabled={testing} className="mt-3 px-3 py-1.5 rounded-full bg-stone-900 text-white text-[11px] font-bold disabled:opacity-50">
+                        {testing ? '测试中...' : '测试连接'}
+                    </button>
+                    {testResult && (
+                        <div className={`mt-2 text-[10.5px] ${testResult.startsWith('连接成功') ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            {testResult}
+                        </div>
+                    )}
+                </div>
                     </div>
-                    {follow && <span className="text-[10px] font-bold shrink-0">✓ 使用中</span>}
-                </button>
-                {apiPresets.length === 0 ? (
-                    <p className="text-[10.5px] text-stone-400 px-1 py-1.5">「设置」里还没有保存的 API 预设——去设置里存几个模型，这里就能直接选。</p>
-                ) : apiPresets.map(p => {
-                    const on = sameAs(p.config);
-                    return (
-                        <button key={p.id} onClick={() => onChoose({ baseUrl: p.config.baseUrl, apiKey: p.config.apiKey, model: p.config.model })}
-                            className={`w-full flex items-center gap-2 rounded-xl p-3 mb-1.5 text-left border transition-all ${on ? 'bg-stone-900 border-stone-900 text-white shadow' : 'bg-white border-stone-200 text-stone-700'}`}>
-                            <div className="flex-1 min-w-0">
-                                <div className="text-[12.5px] font-bold truncate">{p.name}</div>
-                                <div className={`text-[10px] truncate ${on ? 'text-white/60' : 'text-stone-400'}`}>{p.config.model} · {host(p.config.baseUrl)}</div>
-                            </div>
-                            {on && <span className="text-[10px] font-bold shrink-0">✓ 使用中</span>}
-                        </button>
-                    );
-                })}
-            </div>
         </div>
     );
 };
@@ -481,13 +474,12 @@ const PhoneModal: React.FC<{
 const WorldEditor: React.FC<{
     draft: WorldProfile;
     characters: CharacterProfile[];
-    /** 已解析的家园 API（全局家园设置 ?? 全局聊天默认），AI roll NPC 用 */
-    apiConfig: APIConfig;
+    agentRuntimeConfig: AgentRuntimeConfig;
     addToast: (m: string, t?: any) => void;
     onSave: (w: WorldProfile) => void;
     onCancel: () => void;
     onDelete?: () => void;
-}> = ({ draft, characters, apiConfig, addToast, onSave, onCancel, onDelete }) => {
+}> = ({ draft, characters, agentRuntimeConfig, addToast, onSave, onCancel, onDelete }) => {
     const [w, setW] = useState<WorldProfile>(draft);
     const upd = (updates: Partial<WorldProfile>) => setW(prev => ({ ...prev, ...updates }));
     const members = useMemo(() => w.memberIds.map(id => characters.find(c => c.id === id)).filter(Boolean) as CharacterProfile[], [w.memberIds, characters]);
@@ -495,32 +487,31 @@ const WorldEditor: React.FC<{
     // AI roll NPC
     const [rolling, setRolling] = useState(false);
     const rollNpcs = async () => {
-        const api = w.api?.baseUrl ? w.api : apiConfig;
-        if (!api?.baseUrl) { addToast('还没有可用的 API（先在设置里配一个，或给这个世界选个预设）', 'error'); return; }
+        if (!agentRuntimeConfig.agentServerUrl.trim()) { addToast('请先配置 Agent Server', 'error'); return; }
         setRolling(true);
         try {
-            const baseUrl = api.baseUrl.replace(/\/+$/, '');
-            const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` },
-                body: JSON.stringify({
-                    model: api.model,
-                    messages: [{ role: 'user', content: buildNpcRollPrompt({
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: 'local-user',
+                charId: `${w.id || 'world'}-npc-roll`,
+                conversationId: w.id || 'world-editor',
+                prompt: buildNpcRollPrompt({
                         worldName: w.name || '这个世界',
                         worldview: w.worldview,
                         members: members.map(m => ({ name: m.name, persona: (m.description || m.systemPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 200) })),
                         count: 3,
                         existingNames: w.npcs.map(n => n.name).filter(Boolean),
-                    }) }],
-                    temperature: 0.95, stream: false,
                 }),
-            }, 2, 0, { appName: '家园', purpose: `roll NPC · ${w.name || '新世界'}` });
-            const rolled = parseRolledNpcs(data.choices?.[0]?.message?.content || '', w.npcs.map(n => n.name));
+                appName: '家园',
+                purpose: `roll NPC · ${w.name || '新世界'}`,
+                temperature: 0.95,
+                permissionPreset: 'chat-only',
+            });
+            const rolled = parseRolledNpcs(raw, w.npcs.map(n => n.name));
             if (rolled.length === 0) { addToast('这次没 roll 出新的，再试一次？', 'error'); return; }
             upd({ npcs: [...w.npcs, ...rolled.map(n => ({ id: genId('npc'), name: n.name, persona: n.persona, emoji: n.emoji }))] });
             addToast(`roll 到 ${rolled.length} 个 NPC，可以再改`, 'success');
         } catch (e) {
-            addToast('roll 失败了，检查下 API', 'error');
+            addToast('roll 失败了，检查 Agent Server', 'error');
         } finally {
             setRolling(false);
         }
@@ -824,9 +815,9 @@ const WorldEditor: React.FC<{
                 </button>
             )}
 
-            {/* 用量提示：一次观测 ≈ 角色数 + 1 次 API（NPC 引擎 1 次 + 每个角色各 1 次） */}
+            {/* 用量提示：一次观测 ≈ 角色数 + 1 次 Agent 调用（NPC 引擎 1 次 + 每个角色各 1 次） */}
             <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-800">
-                ⚠️ 每次「观测」大约会调用 <b>{Math.max(1, w.memberIds.length)}+1</b> 次 API（{w.memberIds.length} 个角色各 1 次 + NPC 世界引擎 1 次{w.timeMode === 'sim' ? '，每 20 天结卷再多 1 次' : ''}）。角色越多越费，请留意用量；建议在右上角 <b>齿轮</b> 给家园单独配一份<b>更轻量/便宜的 API</b>。
+                每次「观测」大约会调用 <b>{Math.max(1, w.memberIds.length)}+1</b> 次 Agent（{w.memberIds.length} 个角色各 1 次 + NPC 世界引擎 1 次{w.timeMode === 'sim' ? '，每 20 天结卷再多 1 次' : ''}）。角色越多越费，请确认 Agent Server 正在运行。
             </div>
 
             <div className="fixed bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-[#f3eee3] via-[#f3eee3]/95 to-transparent flex gap-2.5 max-w-md mx-auto">
@@ -837,7 +828,7 @@ const WorldEditor: React.FC<{
                             ...w,
                             name: w.name.trim() || '未命名世界',
                             npcs: w.npcs.filter(n => n.name.trim()),
-                            api: w.api?.baseUrl?.trim() ? w.api : undefined,
+                            api: undefined,
                             updatedAt: Date.now(),
                         };
                         onSave(cleaned);
@@ -1649,15 +1640,12 @@ const WorldView: React.FC<{
 // 主组件
 // ============================================================
 const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean) => void }> = ({ embedded, onFullscreen }) => {
-    const { closeApp, characters, addToast, apiConfig, apiPresets } = useOS();
+    const { closeApp, characters, addToast, agentRuntimeConfig } = useOS();
     const [worlds, setWorlds] = useState<WorldProfile[]>([]);
     const [view, setView] = useState<'list' | 'edit' | 'world'>('list');
     const [activeId, setActiveId] = useState<string | null>(null);
     const [draft, setDraft] = useState<WorldProfile | null>(null);
-    // 家园全局 API（所有世界共用一份；不设=跟随全局聊天默认）
-    const [worldApi, setWorldApi] = useState<{ baseUrl: string; apiKey: string; model: string } | null>(loadWorldApi);
     const [showApiSettings, setShowApiSettings] = useState(false);
-    const resolvedApi = useMemo(() => (worldApi?.baseUrl ? { ...apiConfig, ...worldApi } : apiConfig), [worldApi, apiConfig]);
 
     const reload = useCallback(async () => { setWorlds(await DB.getWorlds()); }, []);
     useEffect(() => { reload(); }, [reload]);
@@ -1752,10 +1740,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
 
             {showApiSettings && (
                 <WorldApiSettings
-                    apiConfig={apiConfig}
-                    apiPresets={apiPresets}
-                    current={worldApi}
-                    onChoose={cfg => { setWorldApi(cfg); persistWorldApi(cfg); }}
+                    agentRuntimeConfig={agentRuntimeConfig}
                     onClose={() => setShowApiSettings(false)}
                 />
             )}
@@ -1822,7 +1807,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
                 <WorldEditor
                     draft={draft}
                     characters={characters}
-                    apiConfig={resolvedApi}
+                    agentRuntimeConfig={agentRuntimeConfig}
                     addToast={addToast}
                     onSave={saveWorld}
                     onCancel={goBack}

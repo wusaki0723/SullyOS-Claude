@@ -7,7 +7,7 @@ import { DB } from '../utils/db';
 import { Task, Anniversary, CharacterProfile } from '../types';
 import Modal from '../components/os/Modal';
 import { ContextBuilder } from '../utils/context';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
@@ -73,7 +73,7 @@ const THEMES: Record<ThemeMode, any> = {
 };
 
 const ScheduleApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile } = useOS();
+    const { closeApp, characters, activeCharacterId, agentRuntimeConfig, addToast, userProfile } = useOS();
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
     const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
@@ -124,7 +124,7 @@ const ScheduleApp: React.FC = () => {
 
     const generateTaskReward = async (task: Task) => {
         const supervisor = characters.find(c => c.id === task.supervisorId);
-        if (!supervisor || !apiConfig.apiKey) {
+        if (!supervisor || !agentRuntimeConfig.agentServerUrl?.trim()) {
             addToast('任务已完成', 'success');
             return;
         }
@@ -156,36 +156,21 @@ const ScheduleApp: React.FC = () => {
 - **必须使用用户常用语言**。
 - 不要有引号。`;
 
-            // 2. Separate System and User roles
-            const messages = [
-                { role: "system", content: baseContext },
-                { role: "user", content: userPrompt }
-            ];
-
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: messages,
-                    temperature: 0.9, 
-                    max_tokens: 8000 
-                })
+            let text = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${supervisor.id}-schedule`,
+                conversationId: `${supervisor.id}-schedule`,
+                systemPrompt: baseContext,
+                prompt: userPrompt,
+                appName: '日程',
+                purpose: '任务完成反馈',
+                charName: supervisor.name,
+                userName: userProfile.name,
+                temperature: 0.9,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`API Error ${response.status}: ${errorText.slice(0, 100)}`);
-            }
-
-            const data = await safeResponseJson(response);
-            
-            // Extract content, handling potential reasoning_content or empty standard content
-            let text = data.choices?.[0]?.message?.content?.trim();
-            if (!text && data.choices?.[0]?.message?.reasoning_content) {
-                // If standard content is empty but model "thought" about it, try to use thought or fallback
-                console.warn("AI returned empty content but has reasoning.");
-            }
+            text = text.trim();
             
             if (text) {
                 text = text.replace(/^["']|["']$/g, '');
@@ -198,7 +183,6 @@ const ScheduleApp: React.FC = () => {
                     content: `[系统: ${userProfile.name} 完成了任务 "${task.title}"。${supervisor.name} 评价道: "${text}"]`
                 });
             } else {
-                console.warn("AI returned empty content", data);
                 addToast('任务完成 (AI 未返回评价)', 'success');
             }
 
@@ -210,7 +194,7 @@ const ScheduleApp: React.FC = () => {
 
     const generateAnniversaryThought = async (anni: Anniversary) => {
         const char = characters.find(c => c.id === anni.charId);
-        if (!char || !apiConfig.apiKey) return;
+        if (!char || !agentRuntimeConfig.agentServerUrl?.trim()) return;
 
         // Check cache (24h)
         if (anni.aiThought && anni.lastThoughtGeneratedAt && (Date.now() - anni.lastThoughtGeneratedAt < 24 * 60 * 60 * 1000)) {
@@ -240,37 +224,28 @@ const ScheduleApp: React.FC = () => {
 - 仅输出一句话。
 - **必须使用用户常用语言**。`;
 
-        const messages = [
-            { role: "system", content: baseContext },
-            { role: "user", content: userPrompt }
-        ];
-
         try {
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: messages,
-                    temperature: 0.8,
-                    max_tokens: 8000
-                })
-            });
-
-            if (!response.ok) {
-                 const errorText = await response.text();
-                 throw new Error(`API Error ${response.status}: ${errorText.slice(0, 50)}`);
-            }
-
-            const data = await safeResponseJson(response);
-            const text = data.choices?.[0]?.message?.content?.trim().replace(/^["']|["']$/g, '');
+            const text = (await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${char.id}-schedule`,
+                conversationId: `${char.id}-schedule`,
+                systemPrompt: baseContext,
+                prompt: userPrompt,
+                appName: '日程',
+                purpose: '日期感想',
+                charName: char.name,
+                userName: userProfile.name,
+                temperature: 0.8,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
+            })).trim().replace(/^["']|["']$/g, '');
             
             if (text) {
                 const updatedAnni = { ...anni, aiThought: text, lastThoughtGeneratedAt: Date.now() };
                 await DB.saveAnniversary(updatedAnni);
                 setAnniversaries(prev => prev.map(a => a.id === anni.id ? updatedAnni : a));
             } else {
-                console.warn("AI returned empty thought", data);
+                console.warn("AI returned empty thought");
             }
         } catch (e: any) { 
             console.error("Anniversary Thought Error:", e);

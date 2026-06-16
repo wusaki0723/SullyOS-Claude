@@ -24,7 +24,9 @@ import { createLifeSimResetCardData } from '../utils/lifeSimChatCard';
 import { buildFallbackLifeSimSessionSummary, buildLifeSimSessionSummaryPrompt } from '../utils/lifeSimSessionSummary';
 import { getLifeSimToneEmoji } from '../utils/lifeSimTone';
 // Offline simulation removed — random events didn't match the theme
-import { extractJson, safeFetchJson } from '../utils/safeApi';
+import { extractJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
+import { AgentRuntimeConfig } from '../types/agentRuntime';
 import { DB } from '../utils/db';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import {
@@ -71,28 +73,33 @@ const genId = () => Math.random().toString(36).slice(2, 10);
 const AI_MAX_RETRIES = 2;
 
 async function callCharAI(
-    apiConfig: { baseUrl: string; apiKey: string; model: string },
-    systemPrompt: string
+    agentRuntimeConfig: AgentRuntimeConfig,
+    systemPrompt: string,
+    meta: {
+        userId: string;
+        charId: string;
+        conversationId: string;
+        purpose: string;
+        charName?: string;
+        userName?: string;
+    }
 ): Promise<string> {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= AI_MAX_RETRIES; attempt++) {
         try {
-            const data = await safeFetchJson(
-                `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                    body: JSON.stringify({
-                        model: apiConfig.model,
-                        messages: [{ role: 'user', content: systemPrompt }],
-                        temperature: 0.85, max_tokens: 8192, stream: false,
-                        response_format: { type: 'json_object' },
-                    }),
-                },
-                2, 0, { appName: '都市人生', purpose: '剧情生成' }
-            );
-            return data?.choices?.[0]?.message?.content?.trim() || '';
+            return (await sendAgentText(agentRuntimeConfig, {
+                userId: meta.userId,
+                charId: meta.charId,
+                conversationId: meta.conversationId,
+                prompt: systemPrompt,
+                appName: '都市人生',
+                purpose: meta.purpose,
+                charName: meta.charName,
+                userName: meta.userName,
+                temperature: 0.85,
+                permissionPreset: 'chat-only',
+            })).trim();
         } catch (e: any) {
             const isNetwork = e?.name === 'AbortError' || e?.message?.includes('fetch') || e?.message?.includes('network') || e?.message?.includes('aborted');
             lastError = e;
@@ -112,7 +119,7 @@ async function callCharAI(
 // ── 主组件 ──────────────────────────────────────────────────────
 
 const LifeSimApp: React.FC = () => {
-    const { apiConfig, apiPresets, characters, userProfile, closeApp } = useOS();
+    const { agentRuntimeConfig, apiPresets, characters, userProfile, closeApp } = useOS();
 
     const [gameState, setGameState] = useState<LifeSimState | null>(null);
     const [isLoading, setIsLoading] = useState(true);
@@ -181,32 +188,27 @@ const LifeSimApp: React.FC = () => {
         return characters.filter(char => !!char.id && allowedIds.has(char.id));
     }, [characters, resolveParticipantCharIds]);
 
-    const resolveLifeSimApiConfig = useCallback((state: LifeSimState | null | undefined) => {
-        if (!state?.useIndependentApiConfig) return apiConfig;
-        const override = state.independentApiConfig || {};
-        return {
-            ...apiConfig,
-            baseUrl: override.baseUrl?.trim() || apiConfig.baseUrl,
-            apiKey: override.apiKey?.trim() || apiConfig.apiKey,
-            model: override.model?.trim() || apiConfig.model,
-        };
-    }, [apiConfig]);
-
     const buildMainPlotAction = useCallback(async (state: LifeSimState) => {
         if (!userProfile) return null;
 
         setProcessingMsg('主线编剧室正在加戏...');
         const fallback = buildFallbackWorldDramaDecision(state);
-        const resolvedApiConfig = resolveLifeSimApiConfig(state);
 
         try {
             let decision = fallback;
-            const canUseApi = !!(resolvedApiConfig?.baseUrl && resolvedApiConfig?.apiKey && resolvedApiConfig?.model);
+            const canUseAgent = !!agentRuntimeConfig.agentServerUrl.trim();
 
-            if (canUseApi) {
+            if (canUseAgent) {
                 const raw = await callCharAI(
-                    { baseUrl: resolvedApiConfig.baseUrl, apiKey: resolvedApiConfig.apiKey, model: resolvedApiConfig.model },
-                    buildWorldDramaPlannerPrompt(userProfile, state, state.actionLog)
+                    agentRuntimeConfig,
+                    buildWorldDramaPlannerPrompt(userProfile, state, state.actionLog),
+                    {
+                        userId: userProfile.id || userProfile.name || 'local-user',
+                        charId: 'lifesim-main-plot',
+                        conversationId: 'lifesim',
+                        purpose: '主线剧情规划',
+                        userName: userProfile.name,
+                    }
                 );
                 let rawJson = extractJson(raw);
                 if (Array.isArray(rawJson)) rawJson = rawJson[0];
@@ -258,7 +260,7 @@ const LifeSimApp: React.FC = () => {
         } finally {
             setProcessingMsg('');
         }
-    }, [resolveLifeSimApiConfig, userProfile]);
+    }, [agentRuntimeConfig, userProfile]);
 
     // ── 结束回合 ────────────────────────────────────────────────
 
@@ -419,8 +421,7 @@ const LifeSimApp: React.FC = () => {
         if (!userProfile) return;
         let s = deepClone(initialState);
         const replayActions: SimAction[] = [...seededReplayActions];
-        const resolvedApiConfig = resolveLifeSimApiConfig(initialState);
-        const canUseApi = !!(resolvedApiConfig?.baseUrl && resolvedApiConfig?.apiKey && resolvedApiConfig?.model);
+        const canUseAgent = !!agentRuntimeConfig.agentServerUrl.trim();
 
         for (const charId of s.charQueue) {
             const char = characters.find(c => c.id === charId);
@@ -433,7 +434,7 @@ const LifeSimApp: React.FC = () => {
                 let rawJson: any = null;
                 let decision: CharDecision;
 
-                if (canUseApi) {
+                if (canUseAgent) {
                     const rawMessages = await DB.getRecentMessagesByCharId(charId, 20);
                     const chatHistory = formatRecentChatForSim(
                         rawMessages as any, char.name, userProfile.name || '你', 20
@@ -441,8 +442,16 @@ const LifeSimApp: React.FC = () => {
                     await injectMemoryPalace(char, undefined, chatHistory || undefined);
                     const systemPrompt = buildCharTurnSystemPrompt(char, userProfile, chatHistory, s, s.actionLog);
                     const raw = await callCharAI(
-                        { baseUrl: resolvedApiConfig.baseUrl, apiKey: resolvedApiConfig.apiKey, model: resolvedApiConfig.model },
-                        systemPrompt
+                        agentRuntimeConfig,
+                        systemPrompt,
+                        {
+                            userId: userProfile.id || userProfile.name || 'local-user',
+                            charId: `${char.id}-lifesim`,
+                            conversationId: 'lifesim',
+                            purpose: '角色回合决策',
+                            charName: char.name,
+                            userName: userProfile.name,
+                        }
                     );
 
                     rawJson = extractJson(raw);
@@ -526,7 +535,7 @@ const LifeSimApp: React.FC = () => {
         setProcessingMsg('');
         if (replayActions.length > 0) { setShowReplay(true); setReplayIndex(0); }
         if (s.gameOver) setShowGameOver(true);
-    }, [characters, resolveLifeSimApiConfig, saveState, userProfile]);
+    }, [agentRuntimeConfig, characters, saveState, userProfile]);
 
     // ── 用户行动：搅局 ──────────────────────────────────────────
 
@@ -762,19 +771,25 @@ const LifeSimApp: React.FC = () => {
         const participantNames = participantChars.map(char => char.name);
         const fallbackSummary = buildFallbackLifeSimSessionSummary(userProfile?.name || '用户', participantNames, gameState.actionLog).slice(0, 300);
         const mainPlots = gameState.actionLog.filter(action => action.storyKind === 'main_plot');
-        const resolvedApiConfig = resolveLifeSimApiConfig(gameState);
 
         setIsResetting(true);
         setProcessingMsg('正在生成城市小结...');
 
         try {
             let summary = fallbackSummary;
-            const canUseApi = !!(userProfile && resolvedApiConfig?.baseUrl && resolvedApiConfig?.apiKey && resolvedApiConfig?.model);
+            const canUseAgent = !!(userProfile && agentRuntimeConfig.agentServerUrl.trim());
 
-            if (canUseApi && userProfile) {
+            if (canUseAgent && userProfile) {
                 const raw = await callCharAI(
-                    { baseUrl: resolvedApiConfig.baseUrl, apiKey: resolvedApiConfig.apiKey, model: resolvedApiConfig.model },
-                    buildLifeSimSessionSummaryPrompt(userProfile, participantNames, gameState.actionLog)
+                    agentRuntimeConfig,
+                    buildLifeSimSessionSummaryPrompt(userProfile, participantNames, gameState.actionLog),
+                    {
+                        userId: userProfile.id || userProfile.name || 'local-user',
+                        charId: 'lifesim-summary',
+                        conversationId: 'lifesim',
+                        purpose: '重置前城市小结',
+                        userName: userProfile.name,
+                    }
                 );
                 let rawJson = extractJson(raw);
                 if (Array.isArray(rawJson)) rawJson = rawJson[0];
@@ -812,7 +827,7 @@ const LifeSimApp: React.FC = () => {
             setIsResetting(false);
             setProcessingMsg('');
         }
-    }, [gameState, getParticipatingCharacters, resetGame, resolveLifeSimApiConfig, resolveParticipantCharIds, userProfile]);
+    }, [agentRuntimeConfig, gameState, getParticipatingCharacters, resetGame, resolveParticipantCharIds, userProfile]);
 
     const handleDirectReset = useCallback(async () => {
         if (!gameState) return;

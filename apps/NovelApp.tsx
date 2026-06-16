@@ -10,7 +10,7 @@ import NovelWriter from '../components/novel/NovelWriter';
 import { Robot, MaskHappy, PenNib, Books, FolderOpen } from '@phosphor-icons/react';
 
 const NovelApp: React.FC = () => {
-    const { closeApp, novels, addNovel, updateNovel, deleteNovel, characters, updateCharacter, apiConfig, addToast, userProfile, worldbooks } = useOS();
+    const { closeApp, novels, addNovel, updateNovel, deleteNovel, characters, updateCharacter, agentRuntimeConfig, addToast, userProfile, worldbooks } = useOS();
     
     // Navigation State
     const [view, setView] = useState<'shelf' | 'create' | 'write' | 'settings' | 'library'>('shelf');
@@ -326,7 +326,7 @@ const NovelApp: React.FC = () => {
                 updateNovel={updateNovel}
                 characters={characters}
                 userProfile={userProfile}
-                apiConfig={apiConfig}
+                agentRuntimeConfig={agentRuntimeConfig}
                 onBack={() => setView('shelf')}
                 updateCharacter={updateCharacter}
                 collaborators={collaborators}

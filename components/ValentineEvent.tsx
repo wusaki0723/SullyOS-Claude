@@ -556,7 +556,7 @@ export const ValentineSession: React.FC<ValentineSessionProps> = ({ charId, onCl
 
 禁止使用不在列表中的情绪标签。台词用双引号，动作直接写。`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                 body: JSON.stringify({

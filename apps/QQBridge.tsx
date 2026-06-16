@@ -42,6 +42,7 @@ const QQBridge: React.FC = () => {
   const {
     characters,
     apiConfig,
+    agentRuntimeConfig,
     userProfile,
     groups,
     realtimeConfig,
@@ -83,6 +84,7 @@ const QQBridge: React.FC = () => {
     char: char || undefined,
     userProfile,
     apiConfig,
+    agentRuntimeConfig,
     groups,
     emojis: [],
     categories: [],
@@ -210,8 +212,8 @@ const QQBridge: React.FC = () => {
       setEnabled(false);
       return;
     }
-    if (!apiConfig.baseUrl) {
-      log('请先在「设置」配置 LLM API（baseUrl / model）', 'error');
+    if (!agentRuntimeConfig.agentServerUrl) {
+      log('请先在「设置」配置 Agent Server URL', 'error');
       setEnabled(false);
       return;
     }
@@ -260,7 +262,7 @@ const QQBridge: React.FC = () => {
         reconnectTimerRef.current = null;
       }
     };
-  }, [enabled, wsUrl, token, char?.id, apiConfig.baseUrl, handleEvent, log]);
+  }, [enabled, wsUrl, token, char?.id, agentRuntimeConfig.agentServerUrl, handleEvent, log]);
 
   const statusColor = {
     idle: 'bg-slate-300 text-slate-700',

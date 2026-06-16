@@ -174,7 +174,7 @@ async function callCompressionLLM(
 
     try {
         const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
             {
                 method: 'POST',
                 headers: {

@@ -1,8 +1,9 @@
 
 import { CharacterProfile, UserProfile, DailySchedule, ScheduleSlot, Message } from '../types';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 import { ContextBuilder } from './context';
 import { DB } from './db';
-import { safeResponseJson } from './safeApi';
+import { sendAgentText } from './agentClient';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 
 /**
@@ -49,12 +50,6 @@ function repairTruncatedJson(raw: string): string {
   while (braces > 0) { s += '}'; braces--; }
 
   return s;
-}
-
-interface ApiConfig {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
 }
 
 /**
@@ -284,7 +279,7 @@ export function getFlowNarrativeKey(hour: number): 'morning' | 'afternoon' | 'ev
 export async function generateDailyScheduleForChar(
     char: CharacterProfile,
     userProfile: UserProfile,
-    apiConfig: ApiConfig,
+    agentRuntimeConfig: AgentRuntimeConfig,
     forceRegenerate: boolean = false
 ): Promise<DailySchedule | null> {
     // 总开关关闭时直接短路，避免副 API / 兜底调用
@@ -339,24 +334,18 @@ export async function generateDailyScheduleForChar(
         : buildLifestylePrompt(baseContext, char, userProfile, today, dayOfWeek, chatHistoryBlock);
 
     try {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages: [{ role: 'user', content: prompt }],
-                temperature: 0.85,
-                max_tokens: 8000
-            })
+        let content = await sendAgentText(agentRuntimeConfig, {
+            userId: userProfile.id || userProfile.name || 'local-user',
+            charId: `${char.id}-schedule`,
+            conversationId: `${char.id}-schedule`,
+            prompt,
+            appName: '日程',
+            purpose: '生成日程',
+            charName: char.name,
+            userName: userProfile.name,
+            temperature: 0.85,
+            permissionPreset: 'chat-only',
         });
-
-        if (!response.ok) {
-            console.error('[Schedule] API error:', response.status);
-            return null;
-        }
-
-        const data = await safeResponseJson(response);
-        let content = data.choices?.[0]?.message?.content || '';
         content = content.replace(/```json/g, '').replace(/```/g, '').trim();
 
         let parsed: any;
@@ -421,7 +410,7 @@ export async function evolveFlowNarrative(
     schedule: DailySchedule,
     recentMessages: Message[],
     currentNarrative: string,
-    apiConfig: ApiConfig,
+    agentRuntimeConfig: AgentRuntimeConfig,
 ): Promise<string | null> {
     // 总开关关闭时直接短路
     if (!isScheduleFeatureOn(char)) return null;
@@ -479,24 +468,18 @@ ${chatSummary}
 直接输出独白文本，不要JSON，不要任何包裹。`;
 
     try {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages: [{ role: 'user', content: prompt }],
-                temperature: 0.85,
-                max_tokens: 500
-            })
+        let content = await sendAgentText(agentRuntimeConfig, {
+            userId: userProfile.id || userProfile.name || 'local-user',
+            charId: `${char.id}-schedule`,
+            conversationId: `${char.id}-schedule`,
+            prompt,
+            appName: '日程',
+            purpose: '演化内心独白',
+            charName: char.name,
+            userName: userProfile.name,
+            temperature: 0.85,
+            permissionPreset: 'chat-only',
         });
-
-        if (!response.ok) {
-            console.error('[Schedule/Evolve] API error:', response.status);
-            return null;
-        }
-
-        const data = await safeResponseJson(response);
-        let content = data.choices?.[0]?.message?.content || '';
         // 清理可能的引号包裹
         content = content.trim().replace(/^["']|["']$/g, '').trim();
 

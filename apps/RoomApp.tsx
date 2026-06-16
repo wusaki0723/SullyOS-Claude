@@ -8,7 +8,7 @@ import { ContextBuilder } from '../utils/context';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { Door, Sparkle, Image, GearSix, Camera } from '@phosphor-icons/react';
 import { FURNITURE_ICONS } from '../utils/furnitureIcons';
 import PixelHomeView from './pixelHome/PixelHomeView';
@@ -257,7 +257,7 @@ const renderNotebookContent = (text: string) => {
 };
 
 const RoomApp: React.FC = () => {
-    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, addToast, userProfile } = useOS();
+    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, updateCharacter, agentRuntimeConfig, addToast, userProfile } = useOS();
 
     // Core State
     const [viewState, setViewState] = useState<'select' | 'room' | 'pixelHome'>('select');
@@ -450,20 +450,21 @@ const RoomApp: React.FC = () => {
             const baseContext = ContextBuilder.buildCoreContext(c, userProfile, false);
             const fallbackPrompt = `${baseContext}\n\nTask: User entered your room. Just say hello. JSON: { "welcomeMessage": "..." }`;
             
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ 
-                    model: apiConfig.model, 
-                    messages: [{ role: "user", content: fallbackPrompt }], 
-                    temperature: 0.5,
-                    max_tokens: 8000 // Keep it tiny
-                })
+            let content = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${c.id}-room`,
+                conversationId: `${c.id}-room`,
+                prompt: fallbackPrompt,
+                systemPrompt: '你是 SullyOS 小窝 App 的房间状态生成器。严格输出 JSON，不要解释任务。',
+                appName: '小窝',
+                purpose: '房间兜底初始化',
+                charName: c.name,
+                userName: userProfile.name,
+                temperature: 0.5,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                let content = data.choices?.[0]?.message?.content || '{"welcomeMessage": "..."}';
+            if (content) {
                 content = content.replace(/```json/g, '').replace(/```/g, '').trim();
                 
                 try {
@@ -499,7 +500,7 @@ const RoomApp: React.FC = () => {
     };
 
     const initializeRoomState = async (c: CharacterProfile, currentItems: RoomItem[], force: boolean = false) => {
-        if (!apiConfig.apiKey) return;
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) return;
 
         setIsInitializing(true);
         const loadingTexts = [`正在打扫${c.name}的房间...`, "正在整理思绪...", "正在擦拭家具...", "正在生成全部物品记忆..."];
@@ -597,27 +598,21 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
             // CONSOLE LOG REMOVED FOR PRODUCTION CLEANUP
 
             // FIX: Add Safety Settings & Lower Temperature
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ 
-                    model: apiConfig.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.5, // Lower temp for stability
-                    max_tokens: 8000,
-                    // Safety Settings injection for Gemini-based proxies
-                    safetySettings: [
-                        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-                    ]
-                })
+            let content = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: `${c.id}-room`,
+                conversationId: `${c.id}-room`,
+                prompt,
+                systemPrompt: '你是 SullyOS 小窝 App 的房间状态生成器。严格输出 JSON，不要解释任务。',
+                appName: '小窝',
+                purpose: '房间状态初始化',
+                charName: c.name,
+                userName: userProfile.name,
+                temperature: 0.5,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                let content = data.choices?.[0]?.message?.content || "";
+            if (content) {
                 
                 // CRITICAL FIX: Empty content check triggers fallback
                 if (!content) {

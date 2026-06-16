@@ -76,7 +76,7 @@ strength 范围 0.3-0.8。没有关联返回 []。只输出 JSON。`;
 
     try {
         const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
             {
                 method: 'POST',
                 headers: {

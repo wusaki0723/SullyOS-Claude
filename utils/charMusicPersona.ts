@@ -12,34 +12,25 @@
  *    让用户误以为 char 真的喜欢这些艺人。宁可让用户重试，也不能污染人格。
  */
 
-import { APIConfig, CharacterProfile, CharMusicProfile, CharPlaylist, UserProfile } from '../types';
+import { CharacterProfile, CharMusicProfile, CharPlaylist, UserProfile } from '../types';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 import { ContextBuilder } from './context';
+import { sendAgentText } from './agentClient';
 
-const callLlm = async (api: APIConfig, sys: string, user: string): Promise<string> => {
-    const baseUrl = api.baseUrl.replace(/\/+$/, '');
-    const resp = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${api.apiKey || 'sk-none'}`,
-        },
-        body: JSON.stringify({
-            model: api.model,
-            messages: [
-                { role: 'system', content: sys },
-                { role: 'user', content: user },
-            ],
-            temperature: 0.8,
-            // 之前没设 max_tokens，有的 provider 默认只给 512，JSON 直接被截断 →
-            // extractJson 失败 → 旧逻辑 fallback 到"告五人/陈绮贞"。
-            // 8000 和项目里其它 prompt 一档，给 thinking 模型 / 话多的模型留足空间。
-            max_tokens: 8000,
-            stream: false,
-        }),
+const callLlm = async (agentRuntimeConfig: AgentRuntimeConfig, sys: string, user: string, char: CharacterProfile, userProfile: UserProfile): Promise<string> => {
+    return sendAgentText(agentRuntimeConfig, {
+        userId: userProfile.id || userProfile.name || 'local-user',
+        charId: `${char.id}-music-persona`,
+        conversationId: `${char.id}-music-persona`,
+        systemPrompt: sys,
+        prompt: user,
+        appName: '音乐',
+        purpose: '角色音乐人格初始化',
+        charName: char.name,
+        userName: userProfile.name,
+        temperature: 0.8,
+        permissionPreset: 'chat-only',
     });
-    if (!resp.ok) throw new Error(`LLM ${resp.status}`);
-    const j = await resp.json();
-    return j?.choices?.[0]?.message?.content || '';
 };
 
 /**
@@ -220,16 +211,16 @@ export const CharMusicPersona = {
     async initialize(
         char: CharacterProfile,
         userProfile: UserProfile,
-        apiConfig: APIConfig,
+        agentRuntimeConfig: AgentRuntimeConfig,
     ): Promise<CharMusicProfile> {
         const now = Date.now();
 
-        if (!apiConfig.baseUrl || !apiConfig.model) {
-            throw new Error('未配置 API（baseUrl 或 model 为空）');
+        if (!agentRuntimeConfig.agentServerUrl.trim()) {
+            throw new Error('未配置 Agent Server');
         }
 
         const { sys, usr } = buildPersonaPrompt(char, userProfile);
-        const rawText = await callLlm(apiConfig, sys, usr);
+        const rawText = await callLlm(agentRuntimeConfig, sys, usr, char, userProfile);
         if (!rawText || !rawText.trim()) {
             throw new Error('LLM 返回为空');
         }

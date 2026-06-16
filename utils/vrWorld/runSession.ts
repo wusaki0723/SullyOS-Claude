@@ -15,18 +15,19 @@
  */
 
 import {
-    CharacterProfile, UserProfile, GroupProfile, RealtimeConfig, APIConfig,
+    CharacterProfile, UserProfile, GroupProfile, RealtimeConfig,
     VRWorldNovel, VRCardMeta, VRRoomId, VRMusicRoomState, CharPlaylistSong, CharMusicReview,
     VRGuestbookState, VRGuestbookMessage, VRLetter, VRScript,
 } from '../../types';
 import { DB } from '../db';
 import { buildChatRequestPayload } from '../chatRequestPayload';
-import { safeFetchJson } from '../safeApi';
+import { sendAgentMessage } from '../agentClient';
+import { AgentRuntimeConfig } from '../../types/agentRuntime';
 import { processNewMessages } from '../memoryPalace/pipeline';
 import { loadMusicCfgStandalone } from '../../context/MusicContext';
 import { getCharLyricSnippet } from '../charLyricCache';
 import { getRoom, VR_DEFAULT_INTERVAL_MIN } from './constants';
-import { getVRApi, logVRApiCall } from './vrApi';
+import { logVRApiCall } from './vrApi';
 import { PostOffice } from './postOffice';
 import { getReadingWindow, getBookmark, buildAnnotation } from './novel';
 import {
@@ -49,7 +50,7 @@ export interface VRSessionDeps {
     char: CharacterProfile;
     /** 全部角色（算听歌房在场名单用） */
     characters: CharacterProfile[];
-    apiConfig: APIConfig;
+    agentRuntimeConfig: AgentRuntimeConfig;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig?: RealtimeConfig;
@@ -131,14 +132,10 @@ function rollRoom(char: CharacterProfile, novels: VRWorldNovel[], musicState: VR
 }
 
 export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult> {
-    const { char, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId } = deps;
+    const { char, characters, agentRuntimeConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId } = deps;
 
     if (running.has(char.id)) return { ok: false, reason: 'busy' };
-
-    // API 优先级：角色自带覆盖 > 彼方独立 API > 聊天默认
-    const vrGlobalApi = await getVRApi();
-    const vrApi = char.vrState?.api?.baseUrl ? char.vrState.api : (vrGlobalApi?.baseUrl ? vrGlobalApi : apiConfig);
-    if (!vrApi.baseUrl) return { ok: false, reason: 'no-api' };
+    if (!agentRuntimeConfig.agentServerUrl.trim()) return { ok: false, reason: 'no-agent-server' };
 
     const novels = await DB.getVRNovels();
     const musicState = await DB.getVRMusicRoom();
@@ -286,26 +283,37 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         });
         const systemPrompt = payload.systemPrompt + buildVRSystemAddendum(room, char.name);
 
-        // 调 LLM（记录一次调用，供"调用记录"对账）
-        const baseUrl = vrApi.baseUrl.replace(/\/+$/, '');
+        // 调 Claude Agent Server（记录一次调用，供"调用记录"对账）
         const callStart = Date.now();
-        let data: any;
+        let aiContent = '';
         try {
-            data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${vrApi.apiKey || 'sk-none'}` },
-                body: JSON.stringify({
-                    model: vrApi.model,
-                    messages: [{ role: 'system', content: systemPrompt }, ...payload.cleanedApiMessages, { role: 'user', content: roomTurn }],
-                    temperature: 0.9, stream: false,
-                }),
-            }, 2, 0, { appName: '彼方', charId: char.id, charName: char.name, purpose: '自由活动' });
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });
+            const cleanedApiMessages = [...payload.cleanedApiMessages, { role: 'user' as const, content: roomTurn }];
+            const fullMessages = [{ role: 'system' as const, content: systemPrompt }, ...cleanedApiMessages];
+            const result = await sendAgentMessage(agentRuntimeConfig, {
+                userId: userProfile.id || userProfile.name || 'local-user',
+                charId: `${char.id}-vr`,
+                conversationId: `${char.id}-vr-${room.id}`,
+                turnId: globalThis.crypto?.randomUUID?.() || `vr-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                fullMessages,
+                systemPrompt,
+                cleanedApiMessages,
+                latestUserMessage: roomTurn,
+                options: {
+                    model: agentRuntimeConfig.model,
+                    maxTurns: agentRuntimeConfig.maxTurns ?? 3,
+                    temperature: 0.9,
+                    stream: false,
+                    permissionPreset: 'chat-only',
+                    enabledTools: [],
+                },
+                meta: { appName: '彼方', charName: char.name, userName: userProfile.name, purpose: '自由活动' },
+            });
+            aiContent = result.content || '';
+            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: result.diagnostics?.model || agentRuntimeConfig.model || 'claude-agent-sdk', baseUrl: agentRuntimeConfig.agentServerUrl, ok: true, ms: Date.now() - callStart });
         } catch (e: any) {
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
+            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: agentRuntimeConfig.model || 'claude-agent-sdk', baseUrl: agentRuntimeConfig.agentServerUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
             throw e;
         }
-        let aiContent: string = data.choices?.[0]?.message?.content || '';
         aiContent = aiContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
         const prevState = char.vrState || { enabled: true, intervalMinutes: VR_DEFAULT_INTERVAL_MIN };
@@ -506,8 +514,8 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         try {
             const mpEmb = memoryPalaceConfig?.embedding;
             const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-            const mpLLM = (mpLLMConfigured?.baseUrl) ? mpLLMConfigured : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
-            if (char.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM.baseUrl) {
+            const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : undefined;
+            if (char.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM?.baseUrl) {
                 const recentMsgs = await DB.getRecentMessagesByCharId(char.id, 50);
                 void processNewMessages(recentMsgs, char.id, char.name, mpEmb as any, mpLLM as any, userProfile?.name || '', false).catch(() => {});
             }

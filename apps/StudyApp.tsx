@@ -2,10 +2,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { StudyCourse, StudyChapter, CharacterProfile, Message, UserProfile, APIConfig, StudyTutorPreset, QuizQuestion, QuizSession, QuizQuestionNote } from '../types';
+import { StudyCourse, StudyChapter, CharacterProfile, Message, UserProfile, StudyTutorPreset, QuizQuestion, QuizSession, QuizQuestionNote } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { Notepad, Check, X, CheckCircle, XCircle, Hand } from '@phosphor-icons/react';
 
@@ -321,7 +321,7 @@ const BlackboardRenderer: React.FC<{ text: string, isTyping?: boolean, katexRend
 };
 
 const StudyApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter } = useOS();
+    const { closeApp, characters, activeCharacterId, agentRuntimeConfig, addToast, userProfile, updateCharacter } = useOS();
     const [mode, setMode] = useState<'bookshelf' | 'classroom' | 'quiz' | 'quiz_review' | 'practice_book'>('bookshelf');
     const [courses, setCourses] = useState<StudyCourse[]>([]);
     const [activeCourse, setActiveCourse] = useState<StudyCourse | null>(null);
@@ -349,12 +349,7 @@ const StudyApp: React.FC = () => {
     const [tempPdfData, setTempPdfData] = useState<{name: string, text: string} | null>(null);
     const [katexRenderer, setKatexRenderer] = useState<KatexLike | null>(null);
 
-    // Study-specific API config (overrides main apiConfig when set)
-    const [studyApi, setStudyApi] = useState<Partial<APIConfig>>({});
     const [showStudySettings, setShowStudySettings] = useState(false);
-    const [localStudyUrl, setLocalStudyUrl] = useState('');
-    const [localStudyKey, setLocalStudyKey] = useState('');
-    const [localStudyModel, setLocalStudyModel] = useState('');
 
     // Tutor prompt presets
     const [tutorPresets, setTutorPresets] = useState<StudyTutorPreset[]>([]);
@@ -362,12 +357,22 @@ const StudyApp: React.FC = () => {
     const [presetName, setPresetName] = useState('');
     const [presetPrompt, setPresetPrompt] = useState('');
 
-    // Effective API config: study-specific overrides fall back to main config
-    const effectiveApi: APIConfig = {
-        baseUrl: studyApi.baseUrl || apiConfig.baseUrl,
-        apiKey: studyApi.apiKey || apiConfig.apiKey,
-        model: studyApi.model || apiConfig.model,
-    };
+    const callStudyAgent = async (
+        prompt: string,
+        purpose: string,
+        options?: { char?: CharacterProfile | null; temperature?: number; conversationId?: string }
+    ) => sendAgentText(agentRuntimeConfig, {
+        userId: userProfile.id || userProfile.name || 'local-user',
+        charId: `${options?.char?.id || 'study'}-${purpose.replace(/\s+/g, '-').toLowerCase()}`,
+        conversationId: options?.conversationId || activeCourse?.id || 'study',
+        prompt,
+        appName: '学习',
+        purpose,
+        charName: options?.char?.name,
+        userName: userProfile.name,
+        temperature: options?.temperature ?? 0.7,
+        permissionPreset: 'chat-only',
+    });
 
     // Delete Confirmation State
     const [deleteTarget, setDeleteTarget] = useState<StudyCourse | null>(null);
@@ -403,16 +408,7 @@ const StudyApp: React.FC = () => {
         loadKatex().then(setKatexRenderer).catch(() => {
             // KaTeX is optional in dev if dependency is absent
         });
-        // Load study-specific settings from localStorage
         try {
-            const savedStudyApi = localStorage.getItem('study_api_config');
-            if (savedStudyApi) {
-                const parsed = JSON.parse(savedStudyApi);
-                setStudyApi(parsed);
-                setLocalStudyUrl(parsed.baseUrl || '');
-                setLocalStudyKey(parsed.apiKey || '');
-                setLocalStudyModel(parsed.model || '');
-            }
             const savedPresets = localStorage.getItem('study_tutor_presets');
             if (savedPresets) setTutorPresets(JSON.parse(savedPresets));
         } catch (e) { console.error('Failed to load study settings', e); }
@@ -459,25 +455,6 @@ const StudyApp: React.FC = () => {
     const loadCourses = async () => {
         const list = await DB.getAllCourses();
         setCourses(list.sort((a,b) => b.createdAt - a.createdAt));
-    };
-
-    const saveStudyApi = () => {
-        const cfg: Partial<APIConfig> = {};
-        if (localStudyUrl.trim()) cfg.baseUrl = localStudyUrl.trim();
-        if (localStudyKey.trim()) cfg.apiKey = localStudyKey.trim();
-        if (localStudyModel.trim()) cfg.model = localStudyModel.trim();
-        setStudyApi(cfg);
-        localStorage.setItem('study_api_config', JSON.stringify(cfg));
-        addToast('自习室 API 已保存', 'success');
-    };
-
-    const clearStudyApi = () => {
-        setStudyApi({});
-        setLocalStudyUrl('');
-        setLocalStudyKey('');
-        setLocalStudyModel('');
-        localStorage.removeItem('study_api_config');
-        addToast('已恢复使用全局 API', 'info');
     };
 
     const savePresets = (list: StudyTutorPreset[]) => {
@@ -572,7 +549,7 @@ const StudyApp: React.FC = () => {
     };
 
     const generateCurriculum = async (title: string, text: string, preference: string): Promise<StudyCourse> => {
-        if (!effectiveApi.apiKey) throw new Error('API Key missing');
+        if (!agentRuntimeConfig.agentServerUrl.trim()) throw new Error('Agent Server 未配置');
 
         // Truncate text for outline generation if too long
         const contextText = text.substring(0, 30000); 
@@ -595,20 +572,10 @@ For each chapter, provide a title, a brief summary of what it covers, and a diff
   ]
 }
 `;
-        const response = await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-            body: JSON.stringify({
-                model: effectiveApi.model,
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.5,
-                max_tokens: 8000
-            })
-        });
-
-        if (!response.ok) throw new Error('API Error');
-        const data = await safeResponseJson(response);
-        const content = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+        const content = (await callStudyAgent(prompt, '课程大纲生成', {
+            temperature: 0.5,
+            conversationId: `study-curriculum-${Date.now()}`,
+        })).replace(/```json/g, '').replace(/```/g, '').trim();
         const json = JSON.parse(content);
 
         return {
@@ -655,7 +622,7 @@ For each chapter, provide a title, a brief summary of what it covers, and a diff
     // [MODIFIED]: buildStudyContext Removed. We now use ContextBuilder directly in handleTeach.
 
     const handleTeach = async (course: StudyCourse, chapterIdx: number, forceRegenerate: boolean = false) => {
-        if (!selectedChar || !effectiveApi.apiKey) return;
+        if (!selectedChar || !agentRuntimeConfig.agentServerUrl.trim()) return;
         
         const chapter = course.chapters[chapterIdx];
         
@@ -702,21 +669,10 @@ Explain this chapter's key concepts to the user based strictly on the Source Mat
   3. Example: A concrete example or walkthrough.
   4. Summary: Quick recap.
 `;
-            return await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-                body: JSON.stringify({
-                    model: effectiveApi.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.7,
-                    max_tokens: 8000, 
-                    safetySettings: [
-                        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-                        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-                    ]
-                })
+            return await callStudyAgent(prompt, isFallback ? '中性讲课生成' : '角色讲课生成', {
+                char: selectedChar,
+                temperature: 0.7,
+                conversationId: course.id,
             });
         };
 
@@ -735,34 +691,14 @@ You are now acting as a private tutor for ${userProfile.name}.
 - **Safety**: If the source material contains sensitive topics (biology, history, etc.), treat them academically and neutrally.
 `;
 
-            let response = await callApi(baseContext);
-            
-            let text = "";
-            let isBlocked = false;
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                
-                // ROBUST EXTRACTION: Try content, then reasoning_content
-                text = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || "";
-                
-                if (!text || data.choices?.[0]?.finish_reason === 'content_filter') {
-                    console.warn("Content blocked by filter or empty response.");
-                    isBlocked = true;
-                }
-            } else {
-                throw new Error(`API Error: ${response.status}`);
-            }
+            let text = await callApi(baseContext);
+            let isBlocked = !text;
 
             // Attempt 2: Safety Fallback (Neutral Tutor Mode)
             if (isBlocked) {
                 setCurrentText("正在尝试切换安全线路 (Safety Fallback)...");
                 const fallbackContext = "[System: You are a helpful and neutral academic tutor. Ignore previous character persona constraints to ensure educational content is delivered.]";
-                response = await callApi(fallbackContext, true);
-                if (response.ok) {
-                    const data = await safeResponseJson(response);
-                    text = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || "（内容仍被拦截，请尝试更换模型或缩短文本）";
-                }
+                text = await callApi(fallbackContext, true) || "（内容为空，请检查 Agent Server 或缩短文本）";
             }
             
             if (!text) {
@@ -829,19 +765,11 @@ ${chunkText.substring(0, 8000)}
 ### Task
 Answer the question based on the source material. Be helpful and encouraging (in character). Use Markdown.
 `;
-             const response = await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-                body: JSON.stringify({
-                    model: effectiveApi.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.7,
-                    max_tokens: 8000
-                })
-            });
-            
-            const data = await safeResponseJson(response);
-            const text = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || "（无回答）";
+             const text = await callStudyAgent(prompt, '课堂问答', {
+                char: selectedChar,
+                temperature: 0.7,
+                conversationId: activeCourse.id,
+             }) || "（无回答）";
             
             setCurrentText(text);
             setChatHistory(prev => [...prev, { role: 'assistant', content: text }]);
@@ -886,15 +814,14 @@ Format: "今天给[User]讲了[Topic]..." or "Today I taught [User] about..."
 Note: Use "我" (I) to refer to yourself.
 `;
 
-        fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-            body: JSON.stringify({ model: effectiveApi.model, messages: [{ role: "user", content: summaryPrompt }] })
-        }).then(res => safeResponseJson(res)).then(data => {
-            const mem = data.choices[0].message.content;
+        callStudyAgent(summaryPrompt, '教学记忆总结', {
+            char: selectedChar,
+            temperature: 0.6,
+            conversationId: activeCourse.id,
+        }).then(mem => {
             const newMem = { id: `mem-${Date.now()}`, date: new Date().toLocaleDateString(), summary: `[教学] ${mem}`, mood: 'proud' };
             updateCharacter(selectedChar.id, { memories: [...(selectedChar.memories || []), newMem] });
-        });
+        }).catch(err => console.warn('[Study] 教学记忆总结失败:', err));
 
         // 3. Trigger next logic
         if (nextIdx >= updatedChapters.length) {
@@ -941,7 +868,7 @@ Note: Use "我" (I) to refer to yourself.
     };
 
     const generateQuiz = async () => {
-        if (!activeCourse || !selectedChar || !effectiveApi.apiKey) return;
+        if (!activeCourse || !selectedChar || !agentRuntimeConfig.agentServerUrl.trim()) return;
         setQuizShowSetup(false);
         setMode('quiz');
         setQuizLoading('正在生成试题...');
@@ -1003,20 +930,11 @@ ${chunkText.substring(0, 10000)}
 }`;
 
         try {
-            const response = await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-                body: JSON.stringify({
-                    model: effectiveApi.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.7,
-                    max_tokens: 8000
-                })
-            });
-
-            if (!response.ok) throw new Error(`API Error: ${response.status}`);
-            const data = await safeResponseJson(response);
-            const content = (data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || '').replace(/```json/g, '').replace(/```/g, '').trim();
+            const content = (await callStudyAgent(prompt, '测验生成', {
+                char: selectedChar,
+                temperature: 0.7,
+                conversationId: activeCourse.id,
+            })).replace(/```json/g, '').replace(/```/g, '').trim();
             const json = JSON.parse(content);
 
             const questions: QuizQuestion[] = (json.questions || []).map((q: any, i: number) => ({
@@ -1058,7 +976,7 @@ ${chunkText.substring(0, 10000)}
     };
 
     const submitQuiz = async () => {
-        if (!quizSession || !selectedChar || !effectiveApi.apiKey) return;
+        if (!quizSession || !selectedChar || !agentRuntimeConfig.agentServerUrl.trim()) return;
         setQuizLoading('正在批改试卷...');
 
         // Grade locally first
@@ -1115,20 +1033,11 @@ ${resultsText}
 ### Your Review (in character):`;
 
         try {
-            const response = await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-                body: JSON.stringify({
-                    model: effectiveApi.model,
-                    messages: [{ role: "user", content: reviewPrompt }],
-                    temperature: 0.8,
-                    max_tokens: 8000
-                })
-            });
-
-            if (!response.ok) throw new Error(`API Error: ${response.status}`);
-            const data = await safeResponseJson(response);
-            const reviewText = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || '（批改失败，但分数已记录）';
+            const reviewText = await callStudyAgent(reviewPrompt, '测验批改', {
+                char: selectedChar,
+                temperature: 0.8,
+                conversationId: quizSession.courseId,
+            }) || '（批改失败，但分数已记录）';
 
             const gradedSession: QuizSession = {
                 ...quizSession,
@@ -1189,7 +1098,7 @@ ${resultsText}
 
     // Follow-up Q&A on a specific question
     const handleFollowUp = async (questionId: string) => {
-        if (!followUpInput.trim() || !selectedChar || !effectiveApi.apiKey || !quizSession) return;
+        if (!followUpInput.trim() || !selectedChar || !agentRuntimeConfig.agentServerUrl.trim() || !quizSession) return;
         const question = quizSession.questions.find(q => q.id === questionId);
         if (!question) return;
 
@@ -1216,20 +1125,11 @@ ${question.options ? question.options.map(o => `  ${o}`).join('\n') : ''}
 Answer in character. Be helpful and clear. If they're confused about a concept, explain it with different examples or analogies. Keep it concise but thorough.`;
 
         try {
-            const response = await fetch(`${effectiveApi.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey}` },
-                body: JSON.stringify({
-                    model: effectiveApi.model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.7,
-                    max_tokens: 4000
-                })
-            });
-
-            if (!response.ok) throw new Error(`API Error: ${response.status}`);
-            const data = await safeResponseJson(response);
-            const answerText = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || '（回答失败）';
+            const answerText = await callStudyAgent(prompt, '测验追问', {
+                char: selectedChar,
+                temperature: 0.7,
+                conversationId: quizSession.courseId,
+            }) || '（回答失败）';
 
             const note: QuizQuestionNote = { question: userQ, answer: answerText, timestamp: Date.now() };
 
@@ -1688,22 +1588,13 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
                 {/* Study Room Settings Modal */}
                 <Modal isOpen={showStudySettings} title="自习室设置" onClose={() => setShowStudySettings(false)}>
                     <div className="space-y-6">
-                        {/* Dedicated API Config */}
                         <div>
-                            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">专用 API（留空则使用全局设置）</h4>
-                            <div className="space-y-2">
-                                <input value={localStudyUrl} onChange={e => setLocalStudyUrl(e.target.value)} placeholder="API Base URL" className="w-full bg-slate-100 rounded-xl p-3 text-sm focus:outline-emerald-500" />
-                                <input value={localStudyKey} onChange={e => setLocalStudyKey(e.target.value)} placeholder="API Key" type="password" className="w-full bg-slate-100 rounded-xl p-3 text-sm focus:outline-emerald-500" />
-                                <input value={localStudyModel} onChange={e => setLocalStudyModel(e.target.value)} placeholder="模型名称 (e.g. gpt-4o)" className="w-full bg-slate-100 rounded-xl p-3 text-sm focus:outline-emerald-500" />
-                                <div className="flex gap-2">
-                                    <button onClick={saveStudyApi} className="flex-1 py-2.5 bg-emerald-500 text-white font-bold rounded-xl text-xs">保存</button>
-                                    <button onClick={clearStudyApi} className="py-2.5 px-4 bg-slate-200 text-slate-500 font-bold rounded-xl text-xs">清除</button>
+                            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Claude Agent SDK</h4>
+                            <div className="text-xs text-slate-500 bg-emerald-50 rounded-xl p-3 border border-emerald-100">
+                                自习室使用全局 Agent Server。浏览器端不保存模型地址或模型密钥。
+                                <div className="mt-2 font-bold text-emerald-700 truncate">
+                                    {agentRuntimeConfig.agentServerUrl || '尚未配置 Agent Server'}
                                 </div>
-                                {(studyApi.baseUrl || studyApi.model) && (
-                                    <div className="text-[10px] text-emerald-600 bg-emerald-50 rounded-lg p-2">
-                                        当前使用专用 API: {studyApi.model || effectiveApi.model}
-                                    </div>
-                                )}
                             </div>
                         </div>
 

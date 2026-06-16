@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { NovelBook, NovelSegment, CharacterProfile, UserProfile } from '../../types';
+import { AgentRuntimeConfig } from '../../types/agentRuntime';
 import {
     NOVEL_THEMES, GenerationOptions, extractWritingTags,
     analyzeWriterPersonaSimple, generateWriterPersonaDeep,
@@ -9,14 +10,14 @@ import {
 import Modal from '../os/Modal';
 import ConfirmDialog from '../os/ConfirmDialog';
 import { useOS } from '../../context/OSContext';
-import { safeResponseJson } from '../../utils/safeApi';
+import { sendAgentText } from '../../utils/agentClient';
 
 interface NovelWriterProps {
     activeBook: NovelBook;
     updateNovel: (id: string, updates: Partial<NovelBook>) => Promise<void>;
     characters: CharacterProfile[];
     userProfile: UserProfile;
-    apiConfig: any;
+    agentRuntimeConfig: AgentRuntimeConfig;
     onBack: () => void;
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void;
     collaborators: CharacterProfile[];
@@ -35,12 +36,12 @@ interface PersonaPanelProps {
     setIsTyping: (v: boolean) => void;
     setConfirmDialog: (v: any) => void;
     addToast: (msg: string, type: 'success' | 'error' | 'info') => void;
-    apiConfig: any;
+    agentRuntimeConfig: AgentRuntimeConfig;
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void;
 }
 
 const PersonaPanel: React.FC<PersonaPanelProps> = ({ 
-    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, apiConfig, updateCharacter 
+    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, agentRuntimeConfig, updateCharacter
 }) => {
     const rawPersona = char.writerPersona || analyzeWriterPersonaSimple(char);
     const sections = parsePersonaMarkdown(rawPersona);
@@ -71,7 +72,7 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
                             addToast('正在分析...', 'info'); 
                             setIsTyping(true); 
                             try { 
-                                await generateWriterPersonaDeep(char, userProfile, apiConfig, updateCharacter, true); 
+                                await generateWriterPersonaDeep(char, userProfile, agentRuntimeConfig, updateCharacter, true);
                                 addToast('风格已更新', 'success'); 
                             } catch (e) { 
                                 addToast('失败', 'error'); 
@@ -90,7 +91,7 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
 
 const NovelWriter: React.FC<NovelWriterProps> = ({ 
     activeBook, updateNovel, characters, userProfile, 
-    apiConfig, onBack, updateCharacter, collaborators,
+    agentRuntimeConfig, onBack, updateCharacter, collaborators,
     targetCharId, setTargetCharId, onOpenSettings
 }) => {
     const { addToast } = useOS();
@@ -200,17 +201,21 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
             if (traits.some(t => t.includes('电波') || t.includes('疯'))) temperature = 0.98;
             if (traits.some(t => t.includes('理性') || t.includes('冷') || t.includes('逻辑'))) temperature = 0.6;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature, max_tokens: 8000 })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: userProfile.id || userProfile.name || 'local-user',
+                charId: `${char.id}-novel-writer`,
+                conversationId: activeBook.id,
+                prompt,
+                appName: '小说',
+                purpose: '协作写作',
+                charName: char.name,
+                userName: userProfile.name,
+                temperature,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                if (data.usage?.total_tokens) setLastTokenUsage(data.usage.total_tokens);
-
-                let content = data.choices[0].message.content.trim();
+            if (raw) {
+                setLastTokenUsage(undefined);
+                let content = raw.trim();
                 const originalRaw = content; 
                 content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
                 const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -351,16 +356,18 @@ ${chapterText.substring(0, 200000)}
 6. **写作格式**：使用清晰的结构化格式（可以分段或使用标记），让后续章节的AI仅凭此总结就能无缝衔接创作。
 
 请直接输出总结内容，不需要JSON格式。`;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }] })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: userProfile.id || userProfile.name || 'local-user',
+                charId: `${activeBook.id}-chapter-summary`,
+                conversationId: activeBook.id,
+                prompt,
+                appName: '小说',
+                purpose: '章节归档总结',
+                userName: userProfile.name,
+                temperature: 0.4,
+                permissionPreset: 'chat-only',
             });
-
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                setSummaryContent(data.choices[0].message.content);
-            } else { setSummaryContent('生成失败，请重试。'); }
+            setSummaryContent(raw || '生成失败，请重试。');
         } catch (e: any) { setSummaryContent(`错误: ${e.message}`); } finally { setIsGeneratingSummary(false); }
     };
 
@@ -450,7 +457,7 @@ ${chapterText.substring(0, 200000)}
                         setIsTyping={setIsTyping}
                         setConfirmDialog={setConfirmDialog}
                         addToast={addToast}
-                        apiConfig={apiConfig}
+                        agentRuntimeConfig={agentRuntimeConfig}
                         updateCharacter={updateCharacter}
                     /> : <div className="p-4 text-center text-xs text-slate-400">请先选择一个角色</div>}
                 </div>

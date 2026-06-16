@@ -1,12 +1,13 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { BankShopState, CharacterProfile, UserProfile, APIConfig, ShopStaff } from '../../types';
+import { BankShopState, CharacterProfile, UserProfile, ShopStaff } from '../../types';
+import { AgentRuntimeConfig } from '../../types/agentRuntime';
 import { SHOP_RECIPES } from './BankGameConstants';
 import BankAssetIcon from './BankAssetIcon';
 import { ContextBuilder } from '../../utils/context';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
-import { safeResponseJson } from '../../utils/safeApi';
+import { sendAgentText } from '../../utils/agentClient';
 import { PawPrint, Bell, Sparkle, Book } from '@phosphor-icons/react';
 import { injectMemoryPalace } from '../../utils/memoryPalace/pipeline';
 
@@ -14,7 +15,7 @@ interface Props {
     shopState: BankShopState;
     characters: CharacterProfile[];
     userProfile: UserProfile;
-    apiConfig: APIConfig;
+    agentRuntimeConfig: AgentRuntimeConfig;
     updateState: (s: BankShopState) => Promise<void>;
     onStaffClick?: (staff: ShopStaff) => void;
     onMoveStaff?: (x: number, y: number) => void;
@@ -22,7 +23,7 @@ interface Props {
 }
 
 const BankShopScene: React.FC<Props> = ({
-    shopState, characters, userProfile, apiConfig, updateState,
+    shopState, characters, userProfile, agentRuntimeConfig, updateState,
     onStaffClick, onMoveStaff, onOpenGuestbook
 }) => {
     const { addToast } = useOS();
@@ -94,8 +95,8 @@ const BankShopScene: React.FC<Props> = ({
             addToast(`AP不足 (需${COST})`, 'error');
             return;
         }
-        if (!apiConfig.apiKey) {
-            addToast('请配置 API Key', 'error');
+        if (!agentRuntimeConfig.agentServerUrl.trim()) {
+            addToast('请先配置 Agent Server', 'error');
             return;
         }
 
@@ -156,15 +157,20 @@ Output JSON: { "action": "...", "comment": "你进店后说的话" }
 Language: Chinese.`;
             }
 
-            const res = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }] })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: userProfile.id || userProfile.name || 'local-user',
+                charId: `${char.id}-bank-shop`,
+                conversationId: 'bank-shop',
+                prompt,
+                appName: '记账咖啡馆',
+                purpose: '角色访店',
+                charName: char.name,
+                userName: userProfile.name,
+                temperature: 0.85,
+                permissionPreset: 'chat-only',
             });
-
-            if (res.ok) {
-                const data = await safeResponseJson(res);
-                let jsonStr = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+            if (raw) {
+                let jsonStr = raw.replace(/```json/g, '').replace(/```/g, '').trim();
                 const result = JSON.parse(jsonStr);
                 const comment = result.comment || '来逛逛~';
 

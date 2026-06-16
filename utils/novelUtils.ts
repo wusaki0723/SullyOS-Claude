@@ -1,7 +1,7 @@
 
 import { CharacterProfile, NovelBook, NovelSegment, UserProfile } from '../types';
 import { ContextBuilder } from './context';
-import { safeResponseJson } from './safeApi';
+import { sendAgentText } from './agentClient';
 
 // --- Visual Themes ---
 export const NOVEL_THEMES = [
@@ -252,7 +252,7 @@ export const extractWritingTaboos = (char: CharacterProfile): string => {
 export const generateWriterPersonaDeep = async (
     char: CharacterProfile,
     userProfile: UserProfile,
-    apiConfig: any,
+    agentRuntimeConfig: any,
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void,
     force: boolean = false
 ): Promise<string> => {
@@ -388,25 +388,23 @@ ${char.memories?.slice(-3).map(m => `- ${m.summary}`).join('\n') || '- 无记忆
 **字数要求**：总共400-600字。`;
 
     try {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json', 
-                'Authorization': `Bearer ${apiConfig.apiKey}` 
-            },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages: [{ role: 'user', content: analysisPrompt }],
-                temperature: 0.7,
-                max_tokens: 8000
-            })
-        });
-        
-        if (response.ok) {
-            const data = await safeResponseJson(response);
-            const rawPersona = data.choices[0].message.content.trim();
-            
-            const formattedPersona = `
+        const rawPersona = (await sendAgentText(agentRuntimeConfig, {
+            userId: userProfile.id || userProfile.name || 'local-user',
+            charId: `${char.id}-novel-persona`,
+            conversationId: 'novel-persona',
+            prompt: analysisPrompt,
+            appName: '小说',
+            purpose: '写作人格分析',
+            charName: char.name,
+            userName: userProfile.name,
+            temperature: 0.7,
+            permissionPreset: 'chat-only',
+        })).trim();
+        if (!rawPersona) {
+            throw new Error('Agent returned empty persona');
+        }
+
+        const formattedPersona = `
 ### ${char.name} 的创作人格档案（AI深度分析）
 
 ${rawPersona}
@@ -421,9 +419,6 @@ ${rawPersona}
             });
             
             return formattedPersona;
-        } else {
-            throw new Error(`API Error: ${response.status}`);
-        }
     } catch (e: any) {
         console.error('Deep analysis failed:', e);
         return analyzeWriterPersonaSimple(char);

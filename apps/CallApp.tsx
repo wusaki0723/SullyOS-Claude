@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Microphone, SpeakerHigh, SpeakerSlash, PhoneDisconnect, Translate, Gear, Clock, CaretLeft, CaretRight } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
-import { safeFetchJson } from '../utils/safeApi';
+import { sendAgentMessage } from '../utils/agentClient';
 import { minimaxFetch } from '../utils/minimaxEndpoint';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { hashTtsParams, getCachedTts, saveCachedTts } from '../utils/ttsCache';
@@ -283,7 +283,7 @@ const buildCallPrompt = (userName: string, charName?: string, coreContext?: stri
   return [coreContext, timeContext, callPrompt, voiceLangPrompt].filter(Boolean).join('\n\n');
 };
 const CallApp: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, agentRuntimeConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter } = useOS();
 
   const [viewMode, setViewMode] = useState<ViewMode>('role-select');
   const [selectedCharId, setSelectedCharId] = useState<string>(activeCharacterId || characters[0]?.id || '');
@@ -660,8 +660,7 @@ const CallApp: React.FC = () => {
     return [...history, { role: 'user', content: finalInput }];
   };
   const requestAssistantReply = async (input: string, skipDbId?: number): Promise<string> => {
-    const baseUrl = apiConfig.baseUrl?.replace(/\/+$/, '');
-    if (!baseUrl) throw new Error('请先在设置里配置聊天 API URL');
+    if (!agentRuntimeConfig.agentServerUrl?.trim()) throw new Error('请先在设置里配置 Agent Server URL');
     const userName = userProfile?.name?.trim() || '用户';
     if (selectedChar) {
       const callMsgs = await DB.getMessagesByCharId(selectedChar.id);
@@ -671,17 +670,27 @@ const CallApp: React.FC = () => {
       ? buildCallPrompt(userName, selectedChar.name, ContextBuilder.buildCoreContext(selectedChar, userProfile, true), voiceLang || undefined)
       : buildCallPrompt(userName, selectedChar?.name, undefined, voiceLang || undefined);
     const messages = await buildHistoryMessages(input, skipDbId);
-    const chatData = await safeFetchJson(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}` },
-      body: JSON.stringify({
-        model: apiConfig.model,
-        messages: [{ role: 'system', content: systemPrompt }, ...messages],
-        temperature: 0.85,
+    const sessionCharId = `${selectedChar?.id || 'unknown'}-call`;
+    const result = await sendAgentMessage(agentRuntimeConfig, {
+      userId: (userProfile as any)?.id || userName || 'local-user',
+      charId: sessionCharId,
+      conversationId: sessionCharId,
+      turnId: (globalThis.crypto?.randomUUID?.() || `call-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+      fullMessages: [{ role: 'system', content: systemPrompt }, ...(messages as any)],
+      systemPrompt,
+      cleanedApiMessages: messages as any,
+      latestUserMessage: input,
+      options: {
+        model: agentRuntimeConfig.model,
+        maxTurns: agentRuntimeConfig.maxTurns,
+        temperature: agentRuntimeConfig.temperature ?? 0.85,
         stream: false,
-      }),
-    }, 2, 0, { appName: '电话', charId: selectedChar?.id, charName: selectedChar?.name, purpose: '语音通话' });
-    const assistantText = chatData?.choices?.[0]?.message?.content?.trim() || '';
+        permissionPreset: 'chat-only',
+        enabledTools: [],
+      },
+      meta: { appName: '电话', charName: selectedChar?.name, userName, purpose: '语音通话' },
+    });
+    const assistantText = result.content?.trim() || '';
     if (!assistantText) throw new Error('文本接口返回为空');
     return assistantText;
   };

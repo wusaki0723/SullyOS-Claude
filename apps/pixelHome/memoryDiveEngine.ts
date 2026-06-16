@@ -299,7 +299,7 @@ export async function callDiveLLM(
   const prompt = buildDivePrompt(req, charContext);
 
   const data = await safeFetchJson(
-    `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+    `${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
     {
       method: 'POST',
       headers: {
@@ -845,7 +845,7 @@ export async function planRoomVisit(
   const prompt = buildRoomScriptPrompt(params, memoryTexts, charContext);
 
   const data = await safeFetchJson(
-    `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+    `${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
     {
       method: 'POST',
       headers: {
@@ -1004,7 +1004,7 @@ export async function emitDiveEmotion(params: EmitDiveEmotionParams): Promise<vo
 
     const prompt = buildDiveEmotionPrompt(params);
     const data = await safeFetchJson(
-      `${params.api.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+      `${params.api.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
       {
         method: 'POST',
         headers: {

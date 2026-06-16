@@ -4,8 +4,7 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
 import { processImage } from '../utils/file';
-import { safeResponseJson, extractContent } from '../utils/safeApi';
-import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
+import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { formatMessageWithTime } from '../utils/messageFormat';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from '../utils/xhsMcpClient';
 import { isMcdConfigured } from '../utils/mcdMcpClient';
@@ -30,8 +29,8 @@ import { useChatAI } from '../hooks/useChatAI';
 import { synthesizeSpeechDetailed, cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { isInstantConfigReady, loadInstantConfig } from '../utils/instantPushClient';
+import { forgetPendingAgentTask, getAgentTask, getPendingAgentTasks, resetAgentSession, sendAgentMessage } from '../utils/agentClient';
 
-const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 type InstantToolUiStatus = {
     charId: string;
     phase: 'running' | 'continuing' | 'done' | 'failed';
@@ -41,7 +40,7 @@ type InstantToolUiStatus = {
 };
 
 const Chat: React.FC = () => {
-    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, apiPresets, addApiPreset, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, lastMsgTimestamp, groups, clearUnread, realtimeConfig, memoryPalaceConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars } = useOS();
+    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, agentRuntimeConfig, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, lastMsgTimestamp, groups, clearUnread, realtimeConfig, memoryPalaceConfig, theme: osTheme, proactiveComposingChars } = useOS();
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
 
     // 记忆宫殿高水位（用于清空聊天时的安全检查）
@@ -94,6 +93,7 @@ const Chat: React.FC = () => {
     const [settingsHideSysLogs, setSettingsHideSysLogs] = useState(false);
     const [settingsHtmlModeCustomPrompt, setSettingsHtmlModeCustomPrompt] = useState('');
     const [preserveContext, setPreserveContext] = useState(true);
+    const [resetAgentOnClear, setResetAgentOnClear] = useState(false);
     const [isVectorizing, setIsVectorizing] = useState(false);
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
     const [selectedEmoji, setSelectedEmoji] = useState<Emoji | null>(null);
@@ -103,6 +103,7 @@ const Chat: React.FC = () => {
     const [archiveProgress, setArchiveProgress] = useState('');
     const [showProactiveModal, setShowProactiveModal] = useState(false);
     const [showThinkingChainModal, setShowThinkingChainModal] = useState(false);
+    const [isResettingAgentSession, setIsResettingAgentSession] = useState(false);
 
     // Archive Prompts State
     const [archivePrompts, setArchivePrompts] = useState<{id: string, name: string, content: string}[]>(DEFAULT_ARCHIVE_PROMPTS);
@@ -137,6 +138,66 @@ const Chat: React.FC = () => {
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
     charRef.current = char; // Keep ref in sync for async callbacks
     const currentThemeId = char?.bubbleStyle || 'default';
+
+    useEffect(() => {
+        if (!char?.id || !agentRuntimeConfig.agentServerUrl) return;
+        let cancelled = false;
+        const userId = (userProfile as any).id || userProfile.name || 'local-user';
+        const recover = async () => {
+            const pending = getPendingAgentTasks()
+                .filter((task) => task.userId === userId && task.charId === char.id)
+                .slice(0, 8);
+            if (!pending.length) return;
+            let restored = 0;
+            for (const item of pending) {
+                try {
+                    const task = await getAgentTask(agentRuntimeConfig, item.taskId);
+                    if (cancelled) return;
+                    if (task.status === 'completed' && task.response?.content) {
+                        await DB.saveMessage({
+                            charId: char.id,
+                            role: 'assistant',
+                            type: 'text',
+                            content: task.response.content,
+                            metadata: {
+                                agentTaskId: task.taskId,
+                                recoveredFromAgentServer: true,
+                                agent: task.response,
+                            },
+                        });
+                        if (task.response.sessionId && task.response.sessionId !== char.agentRuntime?.sessionId) {
+                            updateCharacter(char.id, {
+                                agentRuntime: {
+                                    ...(char.agentRuntime || {}),
+                                    sessionId: task.response.sessionId,
+                                },
+                            });
+                        }
+                        forgetPendingAgentTask(item.taskId);
+                        restored += 1;
+                    } else if (task.status === 'failed') {
+                        await DB.saveMessage({
+                            charId: char.id,
+                            role: 'system',
+                            type: 'text',
+                            content: `[后台回复失败: ${task.error?.message || '未知错误'}]`,
+                        });
+                        forgetPendingAgentTask(item.taskId);
+                        restored += 1;
+                    }
+                } catch (err) {
+                    console.warn('[AgentTaskRecovery] skipped', item.taskId, err);
+                }
+            }
+            if (!cancelled && restored > 0) {
+                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                addToast(`已恢复 ${restored} 条后台回复`, 'success');
+            }
+        };
+        void recover();
+        return () => { cancelled = true; };
+    }, [char?.id, agentRuntimeConfig.agentServerUrl, agentRuntimeConfig.clientToken, userProfile.name]);
+
     const activeTheme = useMemo(() => {
         const fallback = PRESET_THEMES.default;
         const found = customThemes.find(t => t.id === currentThemeId) || PRESET_THEMES[currentThemeId] || fallback;
@@ -176,6 +237,7 @@ const Chat: React.FC = () => {
         char,
         userProfile,
         apiConfig,
+        agentRuntimeConfig,
         groups,
         emojis: aiVisibleEmojis,
         categories: visibleCategories,
@@ -316,23 +378,7 @@ const Chat: React.FC = () => {
                 // originalText = text OUTSIDE the voice tag (the display/Chinese text)
                 const textOutsideTag = msg.content.replace(/<[语語]音>[\s\S]*?<\/[语語]音>/g, '').trim();
                 originalText = textOutsideTag ? cleanTextForTts(textOutsideTag) : '';
-                // If voice lang is set and no Chinese text outside the tag, translate spoken text back to Chinese
-                if (voiceLang && !originalText && spokenText) {
-                    try {
-                        const transRes = await fetch(`${apiConfig.baseUrl}/chat/completions`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
-                            body: JSON.stringify({
-                                model: apiConfig.model,
-                                messages: [{ role: 'system', content: '把以下内容翻译成中文。只输出翻译结果，不要任何解释。' }, { role: 'user', content: spokenText }],
-                                temperature: 0.3,
-                            }),
-                        });
-                        const transData = await transRes.json();
-                        const chineseText = transData?.choices?.[0]?.message?.content?.trim();
-                        if (chineseText) originalText = chineseText;
-                    } catch { /* keep originalText empty */ }
-                }
+                if (!originalText) originalText = spokenText;
             } else {
                 // Manual TTS (long-press): no <语音> tag.
                 // Bilingual messages already contain both a target-language side (before
@@ -352,23 +398,6 @@ const Chat: React.FC = () => {
                     originalText = cleanTextForTts(msg.content);
                     if (!originalText || originalText.length < 2) return;
                     spokenText = originalText;
-                    if (voiceLang) {
-                        const langLabel = VOICE_LANG_LABELS[voiceLang] || voiceLang;
-                        try {
-                            const transRes = await fetch(`${apiConfig.baseUrl}/chat/completions`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
-                                body: JSON.stringify({
-                                    model: apiConfig.model,
-                                    messages: [{ role: 'system', content: `Translate the following text to ${langLabel}. Output ONLY the translation, nothing else.` }, { role: 'user', content: originalText }],
-                                    temperature: 0.3,
-                                }),
-                            });
-                            const transData = await transRes.json();
-                            const translated = transData?.choices?.[0]?.message?.content?.trim();
-                            if (translated) spokenText = translated;
-                        } catch { /* use original */ }
-                    }
                 }
             }
 
@@ -665,22 +694,17 @@ const Chat: React.FC = () => {
         };
     }, []);
 
-    // Auto-generate daily schedule (fire-and-forget on chat load)
-    // 总开关关闭时完全跳过：不查询 DB、不调用副 API、不跑兜底
+    // Claude Agent Edition first pass: read existing schedules only. Automatic
+    // schedule generation will be migrated to Agent Server separately.
     useEffect(() => {
-        if (!char || !apiConfig.apiKey) return;
+        if (!char) return;
         if (!isScheduleFeatureOn(char)) {
             setScheduleData(null);
             return;
         }
         const today = new Date().toISOString().split('T')[0];
         DB.getDailySchedule(char.id, today).then(existing => {
-            if (!existing) {
-                // Generate in background, don't block chat
-                generateDailySchedule(char, false);
-            } else {
-                setScheduleData(existing);
-            }
+            if (existing) setScheduleData(existing);
         }).catch(() => {});
     }, [activeCharacterId, char?.scheduleFeatureEnabled]);
 
@@ -1243,17 +1267,9 @@ const Chat: React.FC = () => {
         await DB.saveDailySchedule(updated);
     };
 
-    const generateDailySchedule = async (targetChar: typeof char, forceRegenerate: boolean = false) => {
+    const generateDailySchedule = async (targetChar: typeof char) => {
         if (!targetChar || isScheduleGenerating) return;
-        setIsScheduleGenerating(true);
-        try {
-            const result = await generateDailyScheduleForChar(targetChar, userProfile, apiConfig, forceRegenerate);
-            if (result) setScheduleData(result);
-        } catch (e) {
-            console.error('[Schedule] Generation error:', e);
-        } finally {
-            setIsScheduleGenerating(false);
-        }
+        addToast('Claude Agent SDK 模式下暂不支持自动生成日程；现有日程仍可查看和手动编辑。', 'info');
     };
 
     const handleScheduleStyleChange = async (style: 'lifestyle' | 'mindful') => {
@@ -1262,18 +1278,9 @@ const Chat: React.FC = () => {
         const prevEmotion = char.emotionConfig;
         const nextEmotion = { ...(prevEmotion || {}), enabled: true };
         updateCharacter(char.id, { scheduleStyle: style, emotionConfig: nextEmotion });
-        // Force regenerate with new style — use updated char object
         const updatedChar = { ...char, scheduleStyle: style, emotionConfig: nextEmotion };
         if (!isScheduleFeatureOn(updatedChar)) return;
-        setIsScheduleGenerating(true);
-        try {
-            const result = await generateDailyScheduleForChar(updatedChar, userProfile, apiConfig, true);
-            if (result) setScheduleData(result);
-        } catch (e) {
-            console.error('[Schedule] Regeneration after style change failed:', e);
-        } finally {
-            setIsScheduleGenerating(false);
-        }
+        addToast('日程风格已保存；自动重生成会在 Agent Server 版本恢复。', 'info');
     };
 
     // 日程 / 情绪 buff 总开关
@@ -1442,6 +1449,26 @@ const Chat: React.FC = () => {
         addToast('设置已保存', 'success');
     };
 
+    const handleResetAgentSession = async () => {
+        if (!char || isResettingAgentSession) return;
+        setIsResettingAgentSession(true);
+        try {
+            await resetAgentSession(agentRuntimeConfig, (userProfile as any).id || userProfile.name || 'local-user', char.id);
+            updateCharacter(char.id, {
+                agentRuntime: {
+                    ...(char.agentRuntime || {}),
+                    sessionId: undefined,
+                    lastSessionResetAt: Date.now(),
+                },
+            });
+            addToast('该角色 Claude session 已重置', 'success');
+        } catch (err: any) {
+            addToast(`Claude session 重置失败: ${err?.message || err}`, 'error');
+        } finally {
+            setIsResettingAgentSession(false);
+        }
+    };
+
     const handleClearHistory = async () => {
         if (!char) return;
 
@@ -1481,6 +1508,7 @@ const Chat: React.FC = () => {
                 setTotalMsgCount(remaining.length);
                 setVisibleCount(LOAD_BATCH_SIZE);
                 visibleCountRef.current = LOAD_BATCH_SIZE;
+                if (resetAgentOnClear) await handleResetAgentSession();
                 addToast(`已安全清理 ${processedMsgs.length} 条已处理记录，保留 ${remaining.length} 条未处理记录`, 'success');
                 setModalType('none');
                 return;
@@ -1504,6 +1532,7 @@ const Chat: React.FC = () => {
             setTotalMsgCount(toKeep.length);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
+            if (resetAgentOnClear) await handleResetAgentSession();
             addToast(`已清理 ${toDelete.length} 条历史，保留最近10条`, 'success');
         } else {
             const allIds = (await DB.getMessagesByCharId(char.id, true)).map(m => m.id);
@@ -1513,6 +1542,7 @@ const Chat: React.FC = () => {
             setTotalMsgCount(0);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
+            if (resetAgentOnClear) await handleResetAgentSession();
             addToast('已清空', 'success');
         }
         setModalType('none');
@@ -1584,7 +1614,7 @@ const Chat: React.FC = () => {
                 // 检查高水位是否前进了（如果没前进说明 LLM 失败了）
                 const newHwm = getMemoryPalaceHighWaterMark(char.id);
                 if (newHwm <= hwm) {
-                    addToast('⚠️ 处理中断：LLM 提取失败，请检查副 API 配置', 'error');
+                    addToast('⚠️ 处理中断：记忆宫殿轻量模型处理失败，请检查 Memory Palace 配置', 'error');
                     break;
                 }
             }
@@ -1653,8 +1683,9 @@ const Chat: React.FC = () => {
     };
 
     const handleFullArchive = async () => {
-        if (!apiConfig.apiKey || !char) {
-            addToast('请先配置 API Key', 'error');
+        if (!char) return;
+        if (!agentRuntimeConfig.agentServerUrl) {
+            addToast('请先配置 Agent Server URL', 'error');
             return;
         }
         const allMessages = await DB.getMessagesByCharId(char.id, true);
@@ -1699,20 +1730,31 @@ const Chat: React.FC = () => {
                 prompt = prompt.replace(/\$\{userProfile\.name\}/g, userProfile.name);
                 prompt = prompt.replace(/\$\{rawLog.*?\}/g, rawLog.substring(0, 200000));
 
-                const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                    body: JSON.stringify({
-                        model: apiConfig.model,
-                        messages: [{ role: "user", content: prompt }],
+                const archiveResult = await sendAgentMessage(agentRuntimeConfig, {
+                    userId: (userProfile as any).id || userProfile.name || 'local-user',
+                    charId: `${char.id}-archive`,
+                    conversationId: `${char.id}-archive`,
+                    turnId: (globalThis.crypto?.randomUUID?.() || `archive-${Date.now()}-${idx}`),
+                    fullMessages: [{ role: 'user', content: prompt }],
+                    systemPrompt: '你是 SullyOS 的聊天归档摘要器。只输出归档摘要正文，不要解释任务、不要添加外层说明。',
+                    cleanedApiMessages: [{ role: 'user', content: prompt }],
+                    latestUserMessage: prompt,
+                    options: {
+                        model: agentRuntimeConfig.model,
+                        maxTurns: 1,
                         temperature: 0.5,
-                        max_tokens: 8000 
-                    })
+                        stream: false,
+                        permissionPreset: 'chat-only',
+                        enabledTools: [],
+                    },
+                    meta: {
+                        charName: char.name,
+                        userName: userProfile.name,
+                        appName: '消息',
+                        purpose: '聊天归档',
+                    },
                 });
-
-                if (!response.ok) throw new Error(`API Error on ${dateStr}`);
-                const data = await safeResponseJson(response);
-                let summary = extractContent(data);
+                let summary = archiveResult.content || '';
                 summary = summary.replace(/^["']|["']$/g, '').trim();
 
                 if (summary) {
@@ -1725,7 +1767,7 @@ const Chat: React.FC = () => {
             const total = datesToProcess.length;
 
             if (processedCount === 0) {
-                addToast(`归档失败：${total} 天均未生成摘要（请检查 API/模型）`, 'error');
+                addToast(`归档失败：${total} 天均未生成摘要（请检查 Agent Server）`, 'error');
                 setModalType('none');
             } else {
                 const finalMemories = [...(char.memories || []), ...newMemories];
@@ -2325,6 +2367,7 @@ const Chat: React.FC = () => {
                 settingsContextLimit={settingsContextLimit} setSettingsContextLimit={setSettingsContextLimit}
                 settingsHideSysLogs={settingsHideSysLogs} setSettingsHideSysLogs={setSettingsHideSysLogs}
                 preserveContext={preserveContext} setPreserveContext={setPreserveContext}
+                resetAgentOnClear={resetAgentOnClear} setResetAgentOnClear={setResetAgentOnClear}
                 editContent={editContent} setEditContent={setEditContent}
                 archivePrompts={archivePrompts} selectedPromptId={selectedPromptId} setSelectedPromptId={(id: string) => {
                     setSelectedPromptId(id);
@@ -2373,7 +2416,7 @@ const Chat: React.FC = () => {
                 isScheduleGenerating={isScheduleGenerating}
                 onScheduleEdit={handleScheduleEdit}
                 onScheduleDelete={handleScheduleDelete}
-                onScheduleReroll={() => generateDailySchedule(char, true)}
+                onScheduleReroll={() => generateDailySchedule(char)}
                 onScheduleCoverChange={handleScheduleCoverChange}
                 onScheduleStyleChange={handleScheduleStyleChange}
                 isScheduleFeatureEnabled={isScheduleFeatureOn(char)}
@@ -2381,22 +2424,15 @@ const Chat: React.FC = () => {
                 isMemoryPalaceEnabled={!!char.memoryPalaceEnabled}
                 isVectorizing={isVectorizing}
                 onForceVectorize={handleForceVectorize}
-                apiPresets={apiPresets}
-                onAddApiPreset={addApiPreset}
-                onSaveEmotion={(config) => {
-                    // API 同步到所有角色，enabled 仅写到当前角色
-                    syncEmotionApiToAllCharacters(config.api);
-                    updateCharacter(char.id, {
-                        emotionConfig: {
-                            enabled: config.enabled,
-                            ...(config.api && config.api.baseUrl ? { api: config.api } : {}),
-                        },
-                    });
-                }}
-                onClearBuffs={() => {
-                    updateCharacter(char.id, { activeBuffs: [], buffInjection: '' });
-                    addToast('情绪状态已清除', 'info');
-                }}
+                agentRuntimeConfig={agentRuntimeConfig}
+                onAgentPermissionPresetChange={(preset) => updateCharacter(char.id, {
+                    agentRuntime: {
+                        ...(char.agentRuntime || {}),
+                        permissionPreset: preset,
+                    },
+                })}
+                onResetAgentSession={handleResetAgentSession}
+                isResettingAgentSession={isResettingAgentSession}
              />
              
              <ChatHeader

@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
@@ -18,6 +18,7 @@ import { PushVapidSettingsModal } from '../components/settings/PushVapidSettings
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
+import { checkAgentHealth, checkAgentPushStatus, registerAgentPushSubscription, resetAllAgentSessions, testAgentPushNotification } from '../utils/agentClient';
 
 // hot_news（orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -56,41 +57,34 @@ const DiagRow: React.FC<{ label: string; value: string; bad?: boolean }> = ({ la
 
 const Settings: React.FC = () => {
   const {
-      apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
+      apiConfig, updateApiConfig, agentRuntimeConfig, updateAgentRuntimeConfig, closeApp,
+      characters, updateCharacter,
       exportSystem, importSystem, addToast, showError, resetSystem,
-      apiPresets, addApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
       cloudBackupConfig, updateCloudBackupConfig,
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
   
-  const [localKey, setLocalKey] = useState(apiConfig.apiKey);
-  const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
-  const [localModel, setLocalModel] = useState(apiConfig.model);
-  const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
-  const [localTemperature, setLocalTemperature] = useState<number>(
-    typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
-  );
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
     apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic'
   );
   const [localAceStepKey, setLocalAceStepKey] = useState(apiConfig.aceStepApiKey || '');
+  const [localAgentUrl, setLocalAgentUrl] = useState(agentRuntimeConfig.agentServerUrl || 'http://127.0.0.1:8787');
+  const [localAgentToken, setLocalAgentToken] = useState(agentRuntimeConfig.clientToken || '');
+  const [localAgentModel, setLocalAgentModel] = useState(agentRuntimeConfig.model || 'sonnet');
+  const [localAgentMaxTurns, setLocalAgentMaxTurns] = useState(agentRuntimeConfig.maxTurns || 6);
+  const [localAgentTemperature, setLocalAgentTemperature] = useState(agentRuntimeConfig.temperature ?? 0.85);
+  const [localAgentPermissionPreset, setLocalAgentPermissionPreset] = useState(agentRuntimeConfig.permissionPreset || 'chat-only');
+  const [localAgentBackgroundTasks, setLocalAgentBackgroundTasks] = useState(agentRuntimeConfig.backgroundTasks !== false);
+  const [localAgentPushNotifications, setLocalAgentPushNotifications] = useState(!!agentRuntimeConfig.pushNotifications);
   const [showAceStepGuide, setShowAceStepGuide] = useState(false);
   const [otherStatusMsg, setOtherStatusMsg] = useState('');
-  // 高级设置（流式/温度）默认折叠 — 大多数用户不需要碰
-  const [showApiAdvanced, setShowApiAdvanced] = useState(false);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [newPresetName, setNewPresetName] = useState('');
-  
   // UI States
-  const [showModelModal, setShowModelModal] = useState(false);
-  const [modelFilter, setModelFilter] = useState('');
   const [showExportModal, setShowExportModal] = useState(false); // Used for completion now
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [showPresetModal, setShowPresetModal] = useState(false);
   const [showApiCallLog, setShowApiCallLog] = useState(false);
   const [showRealtimeModal, setShowRealtimeModal] = useState(false);
   const [showCloudModal, setShowCloudModal] = useState(false);
@@ -185,27 +179,6 @@ const Settings: React.FC = () => {
   const [showInstantModal, setShowInstantModal] = useState(false);
   const [showVapidModal, setShowVapidModal] = useState(false);
   const [vapidReadyTick, setVapidReadyTick] = useState(0); // 关闭 VAPID 弹窗后刷新顶层徽标
-
-  // 模型选择 Modal 的过滤 + 公共前缀（memo 掉，避免每次 Settings 重渲染都重算）
-  const modelPickerView = useMemo(() => {
-      const q = modelFilter.trim().toLowerCase();
-      const filtered = q ? availableModels.filter(m => m.toLowerCase().includes(q)) : availableModels;
-      let commonPrefix = '';
-      if (filtered.length >= 2) {
-          let p = filtered[0];
-          for (let i = 1; i < filtered.length; i++) {
-              const s = filtered[i];
-              let j = 0;
-              while (j < p.length && j < s.length && p[j] === s[j]) j++;
-              p = p.slice(0, j);
-              if (!p) break;
-          }
-          const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('-'));
-          if (cut > 3) p = p.slice(0, cut + 1);
-          if (p.length >= 4) commonPrefix = p;
-      }
-      return { filtered, commonPrefix };
-  }, [modelFilter, availableModels]);
 
   const refreshPpDiag = useCallback(async () => {
       try { setPpDiag(await getPushDiagnostics()); } catch { /* ignore */ }
@@ -335,52 +308,32 @@ const Settings: React.FC = () => {
 
   // Auto-save draft configs locally to prevent loss during typing
   useEffect(() => {
-      setLocalUrl(apiConfig.baseUrl);
-      setLocalKey(apiConfig.apiKey);
-      setLocalModel(apiConfig.model);
-      setLocalStream(apiConfig.stream === true);
-      setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
       setLocalAceStepKey(apiConfig.aceStepApiKey || '');
-  }, [apiConfig]);
-
-  const loadPreset = (preset: typeof apiPresets[0]) => {
-      setLocalUrl(preset.config.baseUrl);
-      setLocalKey(preset.config.apiKey);
-      setLocalModel(preset.config.model);
-      setLocalStream(preset.config.stream === true);
-      setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
-      // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
-      // has only one MiniMax / Replicate account regardless of which LLM preset they use.
-      addToast(`已加载配置: ${preset.name}`, 'info');
-  };
-
-  const handleSavePreset = () => {
-      if (!newPresetName.trim()) {
-          addToast('请输入预设名称', 'error');
-          return;
-      }
-      addApiPreset(newPresetName, {
-        baseUrl: localUrl,
-        apiKey: localKey,
-        model: localModel,
-        stream: localStream,
-        temperature: localTemperature,
-      });
-      setNewPresetName('');
-      setShowPresetModal(false);
-      addToast('预设已保存', 'success');
-  };
+      setLocalAgentUrl(agentRuntimeConfig.agentServerUrl || 'http://127.0.0.1:8787');
+      setLocalAgentToken(agentRuntimeConfig.clientToken || '');
+      setLocalAgentModel(agentRuntimeConfig.model || 'sonnet');
+      setLocalAgentMaxTurns(agentRuntimeConfig.maxTurns || 6);
+      setLocalAgentTemperature(agentRuntimeConfig.temperature ?? 0.85);
+      setLocalAgentPermissionPreset(agentRuntimeConfig.permissionPreset || 'chat-only');
+      setLocalAgentBackgroundTasks(agentRuntimeConfig.backgroundTasks !== false);
+      setLocalAgentPushNotifications(!!agentRuntimeConfig.pushNotifications);
+  }, [apiConfig, agentRuntimeConfig]);
 
   const handleSaveApi = () => {
-    updateApiConfig({
-      apiKey: localKey,
-      baseUrl: localUrl,
-      model: localModel,
-      stream: localStream,
-      temperature: localTemperature,
+    updateAgentRuntimeConfig({
+      agentServerUrl: localAgentUrl.trim(),
+      clientToken: localAgentToken.trim(),
+      model: localAgentModel.trim() || 'sonnet',
+      maxTurns: Math.max(1, Math.floor(localAgentMaxTurns || 6)),
+      temperature: localAgentTemperature,
+      stream: false,
+      permissionPreset: localAgentPermissionPreset,
+      enabledTools: [],
+      backgroundTasks: localAgentBackgroundTasks,
+      pushNotifications: localAgentPushNotifications,
     });
     setStatusMsg('配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
@@ -395,35 +348,6 @@ const Settings: React.FC = () => {
     });
     setOtherStatusMsg('已保存');
     setTimeout(() => setOtherStatusMsg(''), 2000);
-  };
-
-  const fetchModels = async () => {
-    if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
-    setIsLoadingModels(true);
-    setStatusMsg('正在连接...');
-    try {
-        const baseUrl = localUrl.replace(/\/+$/, '');
-        const response = await fetch(`${baseUrl}/models`, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${localKey}`, 'Content-Type': 'application/json' }
-        });
-        if (!response.ok) throw new Error(`Status ${response.status}`);
-        const data = await safeResponseJson(response);
-        // Support various API response formats
-        const list = data.data || data.models || [];
-        if (Array.isArray(list)) {
-            const models = list.map((m: any) => m.id || m);
-            setAvailableModels(models);
-            if (models.length > 0 && !models.includes(localModel)) setLocalModel(models[0]);
-            setStatusMsg(`获取到 ${models.length} 个模型`);
-            setShowModelModal(true); // Open selector immediately
-        } else { setStatusMsg('格式不兼容'); }
-    } catch (error: any) {
-        console.error(error);
-        setStatusMsg('连接失败');
-    } finally {
-        setIsLoadingModels(false);
-    }
   };
 
   const handleExport = async (mode: 'text_only' | 'media_only' | 'full') => {
@@ -1010,169 +934,212 @@ const Settings: React.FC = () => {
             </p>
         </section>
 
-        {/* AI 连接设置区域 */}
+        {/* Claude Agent SDK 设置区域 */}
         <section className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
              <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                     <div className="p-2 bg-emerald-100/50 rounded-xl text-emerald-600">
                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
                         </svg>
                     </div>
-                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">API 配置</h2>
+                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">Claude Agent SDK</h2>
                 </div>
-                <button onClick={() => setShowPresetModal(true)} className="text-[10px] bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
-                    保存为预设
-                </button>
+                <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-full font-bold">chat-only</span>
             </div>
 
-            {/* Presets List */}
-            {apiPresets.length > 0 && (
-                <div className="mb-4">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">我的预设 (Presets)</label>
-                    <div className="flex gap-2 flex-wrap">
-                        {apiPresets.map(preset => (
-                            <div key={preset.id} className="flex items-center bg-white border border-slate-200 rounded-lg pl-3 pr-1 py-1 shadow-sm">
-                                <span onClick={() => loadPreset(preset)} className="text-xs font-medium text-slate-600 cursor-pointer hover:text-primary mr-2">{preset.name}</span>
-                                <button onClick={() => removeApiPreset(preset.id)} className="p-1 rounded-full text-slate-300 hover:bg-red-50 hover:text-red-400 transition-colors">
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-            
             <div className="space-y-4">
                 <div className="group">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
-                    <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Agent Server URL</label>
+                    <input type="text" value={localAgentUrl} onChange={(e) => setLocalAgentUrl(e.target.value)} placeholder="http://127.0.0.1:8787" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
                 </div>
 
                 <div className="group">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
-                    <input type="password" value={localKey} onChange={(e) => setLocalKey(e.target.value)} placeholder="sk-..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Client Token</label>
+                    <input type="password" value={localAgentToken} onChange={(e) => setLocalAgentToken(e.target.value)} placeholder="可选，本机 localhost 可留空" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
                 </div>
 
-                {/* 高级（流式 / 温度）— 默认折叠，灰色低调，明确写"不建议修改" */}
-                <div className="pt-1">
-                    <button
-                        type="button"
-                        onClick={() => setShowApiAdvanced(v => !v)}
-                        className="text-[10px] text-slate-300 hover:text-slate-400 transition-colors flex items-center gap-1 pl-1 active:scale-95"
-                    >
-                        <span>高级（不建议修改）</span>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-2.5 h-2.5 transition-transform ${showApiAdvanced ? 'rotate-180' : ''}`}>
-                            <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-                        </svg>
-                    </button>
-                    {showApiAdvanced && (
-                        <div className="mt-2 pl-2 border-l-2 border-slate-100 space-y-3 py-2">
-                            <p className="text-[10px] text-slate-300 leading-relaxed">
-                                这两项绝大多数用户保持默认即可。除非接口报错"only stream supported"或对回复风格有强需求，否则不建议改。
-                            </p>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <span className="text-[10px] text-slate-400">流式输出 (Stream)</span>
-                                    <p className="text-[9px] text-slate-300 mt-0.5">仅在你的 API 强制要求时打开</p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() => setLocalStream(v => !v)}
-                                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${localStream ? 'bg-slate-400' : 'bg-slate-200'}`}
-                                >
-                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${localStream ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                                </button>
-                            </div>
-                            <div>
-                                <div className="flex items-center justify-between">
-                                    <span className="text-[10px] text-slate-400">温度 (Temperature)</span>
-                                    <span className="text-[10px] font-mono text-slate-400">{localTemperature.toFixed(2)}</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="2"
-                                    step="0.05"
-                                    value={localTemperature}
-                                    onChange={(e) => setLocalTemperature(parseFloat(e.target.value))}
-                                    className="w-full accent-slate-400 mt-1"
-                                />
-                                <p className="text-[9px] text-slate-300 mt-0.5">默认 0.85；只作用于聊天和约会的主回复</p>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="pt-2">
-                     <div className="flex justify-between items-center mb-1.5 pl-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
-                        <button onClick={fetchModels} disabled={isLoadingModels} className="text-[10px] text-primary font-bold">{isLoadingModels ? 'Fetching...' : '刷新模型列表'}</button>
+                <div className="grid grid-cols-2 gap-3">
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Model</label>
+                        <input type="text" value={localAgentModel} onChange={(e) => setLocalAgentModel(e.target.value)} placeholder="sonnet" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
                     </div>
-                    
-                    <button
-                        onClick={() => setShowModelModal(true)}
-                        title={localModel || 'Select Model...'}
-                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-3 text-sm text-slate-700 flex justify-between items-center gap-2 active:bg-white transition-all shadow-sm"
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Max Turns</label>
+                        <input type="number" min={1} max={50} value={localAgentMaxTurns} onChange={(e) => setLocalAgentMaxTurns(Number(e.target.value) || 6)} className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
+                    </div>
+                </div>
+
+                <div>
+                    <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-slate-400">Temperature</span>
+                        <span className="text-[10px] font-mono text-slate-400">{localAgentTemperature.toFixed(2)}</span>
+                    </div>
+                    <input
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="0.05"
+                        value={localAgentTemperature}
+                        onChange={(e) => setLocalAgentTemperature(parseFloat(e.target.value))}
+                        className="w-full accent-slate-400 mt-1"
+                    />
+                </div>
+
+                <div>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Permission Preset</label>
+                    <select
+                        value={localAgentPermissionPreset}
+                        onChange={(e) => setLocalAgentPermissionPreset(e.target.value as any)}
+                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm text-slate-700 focus:bg-white transition-all"
                     >
-                        <span
-                            className="font-mono overflow-hidden whitespace-nowrap min-w-0 flex-1 text-left"
-                            style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
-                        >
-                            <bdi style={{ direction: 'ltr' }}>{localModel || 'Select Model...'}</bdi>
-                        </span>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-slate-400 flex-shrink-0"><path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" /></svg>
-                    </button>
+                        <option value="chat-only">chat-only</option>
+                        <option value="read-only-tools">read-only-tools</option>
+                        <option value="custom-tools">custom-tools</option>
+                    </select>
+                    <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">第一版默认不开放 Bash、文件编辑和写入工具。Anthropic API Key 只放在 agent-server/.env。</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    <label className={`flex items-center justify-between rounded-2xl px-4 py-3 border ${localAgentBackgroundTasks ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+                        <span className="text-xs font-bold">后台任务</span>
+                        <input
+                            type="checkbox"
+                            checked={localAgentBackgroundTasks}
+                            onChange={(e) => setLocalAgentBackgroundTasks(e.target.checked)}
+                            className="accent-emerald-500"
+                        />
+                    </label>
+                    <label className={`flex items-center justify-between rounded-2xl px-4 py-3 border ${localAgentPushNotifications ? 'bg-violet-50 border-violet-200 text-violet-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+                        <span className="text-xs font-bold">完成后推送</span>
+                        <input
+                            type="checkbox"
+                            checked={localAgentPushNotifications}
+                            onChange={(e) => {
+                                setLocalAgentPushNotifications(e.target.checked);
+                                if (e.target.checked) setLocalAgentBackgroundTasks(true);
+                            }}
+                            className="accent-violet-500"
+                        />
+                    </label>
                 </div>
                 
                 <button onClick={handleSaveApi} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-primary/20 bg-primary active:scale-95 transition-all mt-2">
-                    {statusMsg || '保存配置'}
+                    {statusMsg || '保存 Agent 配置'}
                 </button>
 
-                <button
-                    onClick={async () => {
-                        if (!localUrl.trim() || !localKey.trim() || !localModel.trim()) return;
-                        setTestingApi(true);
-                        setTestApiResult(null);
-                        try {
-                            const res = await fetch(`${localUrl.trim().replace(/\/+$/, '')}/chat/completions`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
-                                body: JSON.stringify({
-                                    model: localModel.trim(),
-                                    messages: [{ role: 'user', content: 'Hi' }],
-                                    max_tokens: 5,
-                                    stream: localStream,
-                                }),
-                            });
-                            if (res.ok) {
-                                // 走 safeResponseJson —— 它能透明把 SSE 流响应拼成普通 chat/completion 结构
-                                const data = await safeResponseJson(res);
-                                const reply = data.choices?.[0]?.message?.content || '';
-                                setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
-                            } else {
-                                const text = await res.text().catch(() => '');
-                                setTestApiResult(`❌ HTTP ${res.status}: ${text.slice(0, 100)}`);
+                <div className="grid grid-cols-2 gap-3">
+                    <button
+                        onClick={async () => {
+                            setTestingApi(true);
+                            setTestApiResult(null);
+                            const cfg = {
+                                ...agentRuntimeConfig,
+                                agentServerUrl: localAgentUrl.trim(),
+                                clientToken: localAgentToken.trim(),
+                                model: localAgentModel.trim() || 'sonnet',
+                                maxTurns: localAgentMaxTurns,
+                                temperature: localAgentTemperature,
+                                permissionPreset: localAgentPermissionPreset as any,
+                                backgroundTasks: localAgentBackgroundTasks,
+                                pushNotifications: localAgentPushNotifications,
+                            };
+                            try {
+                                const ok = await checkAgentHealth(cfg);
+                                setTestApiResult(ok ? '✅ Agent Server 连接正常' : '❌ Agent Server 无响应或 runtime 不匹配');
+                            } finally {
+                                setTestingApi(false);
                             }
-                        } catch (err: any) {
-                            setTestApiResult(`❌ 连接失败: ${err.message}`);
-                        } finally {
-                            setTestingApi(false);
-                        }
-                    }}
-                    disabled={testingApi || !localUrl.trim() || !localKey.trim() || !localModel.trim()}
-                    className={`w-full py-2.5 rounded-2xl font-bold text-sm border mt-2 active:scale-95 transition-all ${
-                        testingApi || !localUrl.trim() || !localKey.trim() || !localModel.trim()
-                            ? 'border-slate-200 text-slate-400 bg-slate-50'
-                            : 'border-primary/30 text-primary bg-primary/5 hover:bg-primary/10'
-                    }`}
-                >
-                    {testingApi ? '测试中...' : '🧪 测试连接'}
-                </button>
+                        }}
+                        disabled={testingApi || !localAgentUrl.trim()}
+                        className={`py-2.5 rounded-2xl font-bold text-sm border active:scale-95 transition-all ${
+                            testingApi || !localAgentUrl.trim()
+                                ? 'border-slate-200 text-slate-400 bg-slate-50'
+                                : 'border-primary/30 text-primary bg-primary/5 hover:bg-primary/10'
+                        }`}
+                    >
+                        {testingApi ? '测试中...' : '测试连接'}
+                    </button>
+                    <button
+                        onClick={async () => {
+                            try {
+                                await resetAllAgentSessions({
+                                    ...agentRuntimeConfig,
+                                    agentServerUrl: localAgentUrl.trim(),
+                                    clientToken: localAgentToken.trim(),
+                                });
+                                characters.forEach((c: any) => updateCharacter(c.id, { agentRuntime: { ...(c.agentRuntime || {}), sessionId: undefined, lastSessionResetAt: Date.now() } }));
+                                addToast('已重置所有 Claude sessions', 'success');
+                            } catch (err: any) {
+                                addToast(`重置失败: ${err.message}`, 'error');
+                            }
+                        }}
+                        disabled={!localAgentUrl.trim()}
+                        className="py-2.5 rounded-2xl font-bold text-sm border border-rose-200 text-rose-600 bg-rose-50 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        重置 Sessions
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    <button
+                        onClick={async () => {
+                            setTestingApi(true);
+                            setTestApiResult(null);
+                            const cfg = {
+                                ...agentRuntimeConfig,
+                                agentServerUrl: localAgentUrl.trim(),
+                                clientToken: localAgentToken.trim(),
+                            };
+                            try {
+                                const status = await checkAgentPushStatus(cfg);
+                                if (!status.configured) {
+                                    setTestApiResult('❌ Agent Server 未配置 VAPID 密钥');
+                                    return;
+                                }
+                                const userId = (userProfile as any).id || userProfile.name || 'local-user';
+                                const result = await registerAgentPushSubscription(cfg, userId);
+                                setTestApiResult(result.ok ? '✅ 已注册这台设备的后台推送' : '❌ 推送订阅注册失败');
+                            } catch (err: any) {
+                                setTestApiResult(`❌ ${err.message || String(err)}`);
+                            } finally {
+                                setTestingApi(false);
+                            }
+                        }}
+                        disabled={testingApi || !localAgentUrl.trim()}
+                        className="py-2.5 rounded-2xl font-bold text-sm border border-violet-200 text-violet-700 bg-violet-50 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        注册本设备
+                    </button>
+                    <button
+                        onClick={async () => {
+                            setTestingApi(true);
+                            setTestApiResult(null);
+                            try {
+                                const cfg = {
+                                    ...agentRuntimeConfig,
+                                    agentServerUrl: localAgentUrl.trim(),
+                                    clientToken: localAgentToken.trim(),
+                                };
+                                const userId = (userProfile as any).id || userProfile.name || 'local-user';
+                                const result = await testAgentPushNotification(cfg, userId);
+                                setTestApiResult(result.sent > 0 ? `✅ 测试推送已发送 (${result.sent}/${result.attempted})` : '❌ 没有可用订阅，请先注册本设备');
+                            } catch (err: any) {
+                                setTestApiResult(`❌ ${err.message || String(err)}`);
+                            } finally {
+                                setTestingApi(false);
+                            }
+                        }}
+                        disabled={testingApi || !localAgentUrl.trim()}
+                        className="py-2.5 rounded-2xl font-bold text-sm border border-sky-200 text-sky-700 bg-sky-50 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        测试推送
+                    </button>
+                </div>
 
                 {testApiResult && (
                     <div className={`mt-2 text-xs px-3 py-2 rounded-xl ${
-                        testApiResult.startsWith('✅') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                        testApiResult?.startsWith('✅') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
                     }`}>
                         {testApiResult}
                     </div>
@@ -1180,7 +1147,7 @@ const Settings: React.FC = () => {
             </div>
         </section>
 
-        {/* API 调用记录入口 — 点开看最近 5 天各 App / 角色 / 用途的调用明细 */}
+        {/* Agent 调用记录入口 — 点开看最近 5 天各 App / 角色 / 用途的调用明细 */}
         <button
             type="button"
             onClick={() => setShowApiCallLog(true)}
@@ -1650,13 +1617,13 @@ const Settings: React.FC = () => {
                   <div className="space-y-1.5 text-emerald-900">
                       <p><b>Cloudflare 能看到：</b>推送订阅凭证 + 角色 ID（一串随机字符串）+ 间隔分钟数。<b>看不到</b>聊天内容、角色人设、AI 回复、API Key、你是谁。</p>
                       <p><b>浏览器厂商的推送服务（Google / Mozilla / Apple）：</b>知道你某时刻收到一条 push，内容是加密的，他们读不到。</p>
-                      <p><b>你的 AI 接口供应商：</b>和平时聊天一样，到点时浏览器在<b>本地</b>直接调你在"API 配置"里填的那个接口，走你自己的 key。Cloudflare 完全不碰这一步。</p>
+                      <p><b>Claude Agent 回复：</b>Agent SDK 模式不会在 Worker 里跑模型，也不会把 Anthropic Key 放进浏览器。主回复仍由前台页面请求你配置的 Agent Server。</p>
                   </div>
               </div>
 
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                   <p className="font-bold text-slate-700 mb-1">一句话</p>
-                  <p className="text-slate-700">聊天记录和 AI 请求只在你自己和 AI 提供商之间，和现在没开 Push 加速时完全一样。Cloudflare 只是一个"到点按门铃"的闹钟。</p>
+                  <p className="text-slate-700">聊天记录和 Agent 请求只在前台页面与 Agent Server 之间流动。Cloudflare 只是一个"到点按门铃"的闹钟，不能代替本地 Agent Server 生成回复。</p>
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
@@ -1874,96 +1841,8 @@ const Settings: React.FC = () => {
           </div>
       </Modal>
 
-      {/* 模型选择 Modal */}
-      <Modal isOpen={showModelModal} title="选择模型" onClose={() => setShowModelModal(false)}>
-        {(() => {
-            const { filtered, commonPrefix } = modelPickerView;
-            return (
-                <div className="space-y-3 p-1">
-                    <div className="flex gap-2">
-                        <input
-                            type="text"
-                            value={localModel}
-                            onChange={(e) => setLocalModel(e.target.value)}
-                            placeholder="手动输入模型名称..."
-                            className="flex-1 bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary focus:bg-white transition-all"
-                        />
-                        <button
-                            onClick={() => setShowModelModal(false)}
-                            className="px-4 py-2.5 bg-primary text-white text-sm font-bold rounded-xl active:scale-95 transition-all"
-                        >
-                            确定
-                        </button>
-                    </div>
-                    {availableModels.length > 0 && (
-                        <div className="relative">
-                            <input
-                                type="text"
-                                value={modelFilter}
-                                onChange={(e) => setModelFilter(e.target.value)}
-                                placeholder={`🔍 搜索 ${availableModels.length} 个模型...`}
-                                className="w-full bg-slate-50 border border-slate-200/60 rounded-xl px-4 py-2 text-xs focus:outline-primary focus:bg-white transition-all"
-                            />
-                            {modelFilter && (
-                                <button
-                                    onClick={() => setModelFilter('')}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs px-2"
-                                >
-                                    ×
-                                </button>
-                            )}
-                        </div>
-                    )}
-                    {commonPrefix && (
-                        <div className="text-[10px] text-slate-400 px-1 flex items-center gap-1 flex-wrap">
-                            <span>共同前缀:</span>
-                            <code className="font-mono bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded break-all">{commonPrefix}</code>
-                            <span className="text-slate-300">(下方已弱化显示)</span>
-                        </div>
-                    )}
-                    <div className="max-h-[40vh] overflow-y-auto no-scrollbar space-y-2">
-                        {filtered.length > 0 ? filtered.map(m => {
-                            const suffix = commonPrefix && m.startsWith(commonPrefix) ? m.slice(commonPrefix.length) : m;
-                            const selected = m === localModel;
-                            return (
-                                <button
-                                    key={m}
-                                    onClick={() => { setLocalModel(m); setShowModelModal(false); }}
-                                    title={m}
-                                    className={`w-full text-left px-4 py-3 rounded-xl text-sm font-mono flex justify-between items-start gap-2 ${selected ? 'bg-primary/10 text-primary font-bold ring-1 ring-primary/20' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
-                                >
-                                    <span className="break-all min-w-0 flex-1 leading-relaxed">
-                                        {commonPrefix && suffix !== m && (
-                                            <span className={selected ? 'text-primary/40 font-normal' : 'text-slate-400 font-normal'}>{commonPrefix}</span>
-                                        )}
-                                        <span>{suffix}</span>
-                                    </span>
-                                    {selected && <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0"></div>}
-                                </button>
-                            );
-                        }) : (
-                            <div className="text-center text-slate-400 py-8 text-xs">
-                                {availableModels.length === 0
-                                    ? '列表为空，可手动输入或点击"刷新模型列表"拉取'
-                                    : `没有匹配 "${modelFilter}" 的模型`}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            );
-        })()}
-      </Modal>
-
       {/* API 调用记录页面 */}
       <ApiCallLogModal isOpen={showApiCallLog} onClose={() => setShowApiCallLog(false)} />
-
-      {/* Preset Name Modal */}
-      <Modal isOpen={showPresetModal} title="保存预设" onClose={() => setShowPresetModal(false)} footer={<button onClick={handleSavePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存</button>}>
-          <div className="space-y-2">
-              <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
-              <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
-          </div>
-      </Modal>
 
       {/* 强制导出 Modal */}
       <Modal isOpen={showExportModal} title="备份下载" onClose={() => setShowExportModal(false)} footer={

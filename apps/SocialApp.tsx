@@ -6,7 +6,7 @@ import { CharacterProfile, SocialPost, SocialComment, SubAccount, SocialAppProfi
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import { House, User, Package, Warning } from '@phosphor-icons/react';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
@@ -133,7 +133,7 @@ const Icons = {
 // --- Main App ---
 
 const SocialApp: React.FC = () => {
-    const { closeApp, characters, updateCharacter, apiConfig, addToast, userProfile, groups } = useOS();
+    const { closeApp, characters, updateCharacter, agentRuntimeConfig, addToast, userProfile, groups } = useOS();
     const [feed, setFeed] = useState<SocialPost[]>([]);
     // Modes: 'home' (Feed) | 'me' (Profile) | 'create' (Modal Overlay)
     const [activeTab, setActiveTab] = useState<'home' | 'me'>('home');
@@ -372,7 +372,7 @@ const SocialApp: React.FC = () => {
 
     // --- AI Logic (Updated for Multi-Handle) ---
     const handleRefresh = async () => {
-        if (!apiConfig.apiKey) { addToast('请配置 API Key', 'error'); return; }
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) { addToast('请配置 Agent Server URL', 'error'); return; }
         setIsRefreshing(true);
         try {
             const shuffledChars = [...characters].sort(() => 0.5 - Math.random());
@@ -431,14 +431,20 @@ ${charContexts}
   },
   ...
 ]`;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.95, max_tokens: 8000 })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: 'spark-feed',
+                conversationId: 'spark-feed',
+                prompt,
+                systemPrompt: '你是 SullyOS Spark 社交流生成器。严格输出 JSON Array，不要解释任务。',
+                appName: 'Spark',
+                purpose: '生成推荐流',
+                userName: userProfile.name,
+                temperature: 0.95,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-            if (!response.ok) throw new Error('API Error');
-            const data = await safeResponseJson(response);
-            const json = safeParseJSON(data.choices[0].message.content);
+            const json = safeParseJSON(raw);
             if (!Array.isArray(json)) throw new Error('Parsed data is not an array');
             
             const newPosts: SocialPost[] = json
@@ -492,7 +498,7 @@ ${charContexts}
     };
 
     const generateComments = async (post: SocialPost) => {
-        if (!post || post.comments.length > 0 || !apiConfig.apiKey) return;
+        if (!post || post.comments.length > 0 || !agentRuntimeConfig.agentServerUrl?.trim()) return;
         setLoadingComments(true);
         try {
             const shuffledChars = [...characters].sort(() => 0.5 - Math.random());
@@ -553,14 +559,21 @@ ${contextPrompt}
 [
   { "author": "网名 (Handle) 或 路人昵称", "content": "评论内容..." }
 ]`;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.8 })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: 'spark-comments',
+                conversationId: 'spark-comments',
+                prompt,
+                systemPrompt: '你是 SullyOS Spark 评论区生成器。严格输出 JSON Array，不要解释任务。',
+                appName: 'Spark',
+                purpose: '生成评论区',
+                userName: userProfile.name,
+                temperature: 0.8,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                const json = safeParseJSON(data.choices[0].message.content);
+            {
+                const json = safeParseJSON(raw);
                 if (Array.isArray(json)) {
                     const comments: SocialComment[] = json
                         .filter((c: any) => {
@@ -597,7 +610,7 @@ ${contextPrompt}
     };
 
     const generateRepliesToUser = async (post: SocialPost, userContent: string) => {
-        if (!apiConfig.apiKey) return;
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) return;
         setIsReplyingToUser(true);
         try {
             // Simplified handle map for replies
@@ -638,14 +651,21 @@ ${identityMap}
 [
   { "author": "网名 (Handle)", "content": "回复内容..." }
 ]`;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.9 })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: 'spark-replies',
+                conversationId: 'spark-replies',
+                prompt,
+                systemPrompt: '你是 SullyOS Spark 评论回复生成器。严格输出 JSON Array，不要解释任务。',
+                appName: 'Spark',
+                purpose: '生成评论回复',
+                userName: userProfile.name,
+                temperature: 0.9,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-            if (response.ok) {
-                const data = await safeResponseJson(response);
-                const json = safeParseJSON(data.choices[0].message.content);
+            {
+                const json = safeParseJSON(raw);
                 if (Array.isArray(json)) {
                     const newReplies: SocialComment[] = json
                         .filter((c: any) => {

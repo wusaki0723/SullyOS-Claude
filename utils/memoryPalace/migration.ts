@@ -137,7 +137,7 @@ date 字段填记忆对应的大概日期。`;
 
     try {
         const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
             {
                 method: 'POST',
                 headers: {

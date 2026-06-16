@@ -3,7 +3,6 @@ import { useState, useRef, useEffect, MutableRefObject } from 'react';
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProfile, RealtimeConfig, CharacterBuff } from '../types';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
-import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
 import { KeepAlive } from '../utils/keepAlive';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ContextBuilder } from '../utils/context';
@@ -33,6 +32,8 @@ import { applyAssistantPostProcessing, type XhsCaches } from '../utils/applyAssi
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { applyEmotionEvalRaw } from '../utils/emotionApply';
 import { isEmotionEvalSkipped } from '../utils/devDebug';
+import { sendAgentMessage } from '../utils/agentClient';
+import type { AgentRuntimeConfig } from '../types/agentRuntime';
 
 // ─── 情绪评估（副API，fire & forget）───
 
@@ -294,41 +295,17 @@ export async function evaluateEmotionBackground(
     charData: CharacterProfile,
     userProfile: UserProfile,
     mainSystemPrompt: string,
-    apiMessages: Array<{ role: string; content: any }>,
-    api: { baseUrl: string; apiKey: string; model: string }
+    apiMessages: Array<{ role: string; content: any }>
 ): Promise<string | null> {
-    try {
-        const prompt = buildEmotionEvalPrompt(charData, userProfile, mainSystemPrompt, apiMessages);
-
-        const baseUrl = api.baseUrl.replace(/\/+$/, '');
-        const headers = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${api.apiKey || 'sk-none'}`
-        };
-
-        const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-                model: api.model,
-                messages: [{ role: 'user', content: prompt }],
-                temperature: 0.85,
-                stream: false
-            })
-        }, 2, 0, { appName: '消息', charId: charData.id, charName: charData.name, purpose: '情绪评估' });
-
-        const raw = data.choices?.[0]?.message?.content || '';
-        return await applyEmotionEvalRaw(raw, charData);
-    } catch (e: any) {
-        console.warn('🎭 [Emotion] Evaluation failed:', e.message);
-        return null;
-    }
+    console.info('🎭 [Emotion] Claude Agent SDK mode: emotion eval is disabled in the first migration stage.');
+    return null;
 }
 
 interface UseChatAIProps {
     char: CharacterProfile | undefined;
     userProfile: UserProfile;
     apiConfig: any;
+    agentRuntimeConfig: AgentRuntimeConfig;
     groups: GroupProfile[];
     emojis: Emoji[];
     categories: EmojiCategory[];
@@ -353,6 +330,7 @@ export const useChatAI = ({
     char,
     userProfile,
     apiConfig,
+    agentRuntimeConfig,
     groups,
     emojis,
     categories,
@@ -458,10 +436,6 @@ export const useChatAI = ({
                 try { await ActiveMsgStore.clearPendingEmotionEval(charIdAtMount); } catch { /* ignore */ }
                 return;
             }
-            const emotionApi = (char.emotionConfig.api?.baseUrl)
-                ? char.emotionConfig.api
-                : { baseUrl: deps.apiConfig.baseUrl, apiKey: deps.apiConfig.apiKey, model: deps.apiConfig.model };
-
             try {
                 // 重新从 DB 拉 history (push msg 此刻已经在 DB 里, activeMsgRuntime 在 dispatch
                 // 事件前已 await saveMessage). limit 200 跟 sendMessage line 543 同等级别.
@@ -505,7 +479,7 @@ export const useChatAI = ({
 
                 setEmotionStatus('evaluating');
                 const innerState = await evaluateEmotionBackground(
-                    char, deps.userProfile, payload.systemPrompt, payload.cleanedApiMessages, emotionApi,
+                    char, deps.userProfile, payload.systemPrompt, payload.cleanedApiMessages,
                 );
                 if (innerState) setEvolvedNarrative(innerState);
                 // 成功后清 pending. 失败不清 → 下次 mount drain 重试.
@@ -574,12 +548,13 @@ export const useChatAI = ({
     const commentParentIdCacheRef = useRef<Map<string, string>>(new Map());
 
     const updateTokenUsage = (data: any, msgCount: number, pass: string) => {
-        if (data.usage?.total_tokens) {
-            setLastTokenUsage(data.usage.total_tokens);
+        const total = data.usage?.total_tokens ?? data.usage?.totalTokens;
+        if (total) {
+            setLastTokenUsage(total);
             const breakdown = {
-                prompt: data.usage.prompt_tokens || 0,
-                completion: data.usage.completion_tokens || 0,
-                total: data.usage.total_tokens,
+                prompt: data.usage.prompt_tokens ?? data.usage.inputTokens ?? 0,
+                completion: data.usage.completion_tokens ?? data.usage.outputTokens ?? 0,
+                total,
                 msgCount,
                 pass
             };
@@ -595,7 +570,8 @@ export const useChatAI = ({
     ) => {
         if (isTyping || !char) return;
         const effectiveApi = overrideApiConfig || apiConfig;
-        if (!effectiveApi.baseUrl) { alert("请先在设置中配置 API URL"); return; }
+        const effectiveAgent = agentRuntimeConfig;
+        if (!effectiveAgent.agentServerUrl) { alert("请先在设置中配置 Agent Server URL"); return; }
 
         setIsTyping(true);
         setRecallStatus('');
@@ -702,469 +678,71 @@ export const useChatAI = ({
             // Save for dev debug viewer
             setLastSystemPrompt(systemPrompt);
 
-            // 3. 情绪评估 (副 API). 直接复用已 build 好的 systemPrompt 和 cleanedApiMessages，确保情绪
-            //    评估和主 API 看到的上下文完全一致；同时产出 innerState（意识流），注入下一轮 system prompt。
-            //    未单独配置情绪 API 时回退到主 apiConfig。
-            //    ── 路径分叉 ──
-            //    - 本地 fetch 模式: 客户端 fire-and-forget 跑 eval (前端活着).
-            //    - instant 模式: 不在客户端跑, 改把 eval prompt + 副 API 凭据塞进 instant 请求 (emotionEval 字段),
-            //      worker 跑完主回复后跑 eval 并推 emotion_update 回来, 客户端 flush 时落 buff —— 这样前端被杀也算数,
-            //      且不会跟客户端 eval 双跑双扣费. 见下方 instant 分支 + worker/instant-push + activeMsgRuntime.
-            const emotionEvalEnabled = !!(!promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled);
-            const instantOn = isInstantConfigReady();
-            const emotionApi = emotionEvalEnabled
-                ? ((char.emotionConfig!.api?.baseUrl)
-                    ? char.emotionConfig!.api!
-                    : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model })
-                : null;
-            if (emotionEvalEnabled && !instantOn && emotionApi) {
-                setEmotionStatus('evaluating');
-                evaluateEmotionBackground(char, userProfile, systemPrompt, cleanedApiMessages, emotionApi)
-                    .then((innerState) => {
-                        if (innerState) setEvolvedNarrative(innerState);
-                    })
-                    .finally(() => {
-                        setEmotionStatus('');
-                    });
-            }
-            const instantEmotionEval = (emotionEvalEnabled && instantOn && emotionApi)
-                ? {
-                    // includeContext=false: 不嵌 system prompt + 对话历史 (worker 复用本次请求的 messages 作前文),
-                    // 把 emotionEval 块压到最小, 让请求体留在 keepalive 64KB 上限内 (关前端也能跑完).
-                    prompt: buildEmotionEvalPrompt(char, userProfile, systemPrompt, cleanedApiMessages, false),
-                    api: { baseUrl: emotionApi.baseUrl, apiKey: emotionApi.apiKey, model: emotionApi.model },
-                }
-                : undefined;
-
-            // instant 情绪评估在 worker 跑 (副 API), 客户端看不到 LLM 调用时机, 但仍要给用户一个
-            // "情绪更新中" 的可见信号 (header 徽章, 跟本地模式一致), 否则 "发送中" 消失后一片空白像死了.
-            // 从这里点亮, 到 worker 推回 emotion_update (activeMsgRuntime fire 'instant-emotion-done')
-            // 或安全超时 (worker 旧/失败/前端被杀) 时熄灭.
-            if (instantEmotionEval) {
-                setEmotionStatus('evaluating');
-                if (instantEmotionTimerRef.current) clearTimeout(instantEmotionTimerRef.current);
-                instantEmotionTimerRef.current = setTimeout(() => {
-                    setEmotionStatus('');
-                    instantEmotionTimerRef.current = null;
-                }, 90_000);  // 安全网: 正常情况下 worker 推回 emotion_update 会 fire 'instant-emotion-done' 提前熄灭; 只在 worker 被杀/推送丢失时兜底.
-            }
-
-            // 发送前汇总计时
-            const perfPreApi = Math.round(performance.now() - perfSendT0);
-            const stageStr = Object.entries(perfStages)
-                .sort((a, b) => b[1] - a[1])
-                .map(([k, v]) => `${k}=${v}ms`)
-                .join(' ');
-            console.log(`⏱ [send→API] pre-API=${perfPreApi}ms | ${stageStr}`);
-
-            // 3. API Call (safe parsing: prevents "Unexpected token <" on HTML error pages)
-            // 温度 / 流式：优先读 effectiveApi（用户在设置里保存的值或预设值），
-            // 缺省时回退到主 apiConfig，再回退默认值（temp=0.85, stream=false）。
-            // safeResponseJson 已能透明拼接 SSE 响应，所以打开 stream 后无需改下游。
+            {
             const apiT0 = performance.now();
-            const userTemp = (effectiveApi as any).temperature ?? apiConfig.temperature ?? 0.85;
-            const userStream = (effectiveApi as any).stream ?? apiConfig.stream ?? false;
-            const baseReqBody: any = {
-                model: effectiveApi.model,
-                messages: fullMessages,
-                temperature: userTemp,
-                max_tokens: 8000,
-                stream: userStream,
+            const latestUserMessage = (() => {
+                const lastUser = [...currentMsgs].reverse().find(m => m.role === 'user');
+                if (!lastUser) return '';
+                return typeof lastUser.content === 'string' ? lastUser.content : JSON.stringify(lastUser.content);
+            })();
+            const turnId = (globalThis.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            const permissionPreset = char.agentRuntime?.permissionPreset || effectiveAgent.permissionPreset || 'chat-only';
+            const result = await sendAgentMessage(effectiveAgent, {
+                userId: (userProfile as any).id || userProfile.name || 'local-user',
+                charId: char.id,
+                conversationId: char.id,
+                turnId,
+                fullMessages: fullMessages as any,
+                systemPrompt,
+                cleanedApiMessages: cleanedApiMessages as any,
+                latestUserMessage,
+                sessionId: char.agentRuntime?.sessionId,
+                options: {
+                    model: effectiveAgent.model,
+                    maxTurns: effectiveAgent.maxTurns,
+                    temperature: effectiveAgent.temperature,
+                    stream: false,
+                    permissionPreset,
+                    enabledTools: char.agentRuntime?.enabledTools || effectiveAgent.enabledTools || [],
+                },
+                meta: {
+                    charName: char.name,
+                    userName: userProfile.name,
+                    appName: '消息',
+                    purpose: '聊天回复',
+                },
+            });
+            console.log(`⏱ [Agent call] ${Math.round(performance.now() - apiT0)}ms`);
+
+            if (result.sessionId && result.sessionId !== char.agentRuntime?.sessionId && updateCharacter) {
+                updateCharacter(char.id, {
+                    agentRuntime: {
+                        ...(char.agentRuntime || {}),
+                        sessionId: result.sessionId,
+                        permissionPreset,
+                        enabledTools: char.agentRuntime?.enabledTools || effectiveAgent.enabledTools || [],
+                    },
+                });
+            }
+
+            updateTokenUsage(result, historyMsgCount, 'agent');
+            const agentData = {
+                id: `agent-${turnId}`,
+                object: 'sully.agent.response',
+                model: result.diagnostics?.model || effectiveAgent.model || '',
+                usage: {
+                    prompt_tokens: result.usage?.inputTokens || 0,
+                    completion_tokens: result.usage?.outputTokens || 0,
+                    total_tokens: result.usage?.totalTokens || 0,
+                },
+                choices: [{
+                    index: 0,
+                    message: { role: 'assistant', content: result.content },
+                    finish_reason: 'stop',
+                }],
+                agent: result,
             };
-            // 思考过程展示开启时显式向后端请求 extended thinking。
-            // 不同代理认不同入口，全都试一遍，代理不识别的会自动忽略：
-            //  - 模型名 -thinking 后缀：packycode / anyrouter 等第三方 Claude 中转的主流约定
-            //  - thinking.type='enabled' / budget_tokens：Anthropic 原生与多数官方代理
-            //  - reasoning_effort：OpenAI 系（o1/o3、GLM-4.5、deepseek-reasoner 等）
-            //  - extra_body.thinking：LiteLLM 系桥
-            // 关掉则一个都不传，避免无谓的 thinking token 计费。
-            // ⚠️ 工具模式(瑞幸点单/麦当劳)下绝不带 thinking/reasoning 参数: "thinking + tools" 同发
-            //    Gemini 等会直接 400 INVALID_ARGUMENT —— 表现就是"开了思考链的角色一点单就报错,
-            //    换个没开思考链的角色就好"。工具循环优先, 思考链这一轮让步。
-            const toolModeActive = payload.flags.luckinChatActive || payload.flags.mcdActive || payload.flags.luckinActive;
-            if (payload.flags.thinkingActive && !toolModeActive) {
-                const m: string = baseReqBody.model || '';
-                if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
-                    baseReqBody.model = `${m}-thinking`;
-                }
-                baseReqBody.thinking = { type: 'enabled', budget_tokens: 4000 };
-                baseReqBody.reasoning_effort = 'medium';
-                baseReqBody.extra_body = { ...(baseReqBody.extra_body || {}), thinking: { type: 'enabled', budget_tokens: 4000 } };
-            }
-            // 流式时显式要求 usage 统计随末尾 chunk 一起返回，否则 token 徽标拿不到数据
-            if (userStream) {
-                baseReqBody.stream_options = { include_usage: true };
-            }
-            // 小程序模式: 给 LLM 一个 UI 钩子工具 propose_cart_items, 推荐时可调用,
-            // 工具不真改购物车也不调 MCP, 只是把推荐渲染成 + 加按钮卡片让用户决定
-            if (payload.flags.mcdActive) {
-                baseReqBody.tools = [MCD_PROPOSE_TOOL];
-                baseReqBody.tool_choice = 'auto';
-            } else if (payload.flags.luckinActive) {
-                baseReqBody.tools = [LUCKIN_PROPOSE_TOOL];
-                baseReqBody.tool_choice = 'auto';
-            } else if (payload.flags.luckinChatActive) {
-                // 瑞幸聊天点单: 给角色真实 8 个 MCP 工具, 自己去查门店/搜商品/定规格/算价
-                const luckinTools = await fetchOpenAIToolsForLuckin();
-                if (luckinTools && luckinTools.length) {
-                    baseReqBody.tools = luckinTools;
-                    baseReqBody.tool_choice = 'auto';
-                }
-            }
 
-            // ─── Instant Push 分支 ───
-            // 与本地 fetch 对称：sendInstantPushAndAwaitReply 内部完成 sub 获取 / push 监听 /
-            // 300s 超时兜底，返回时 push 已落库（或失败）。外层 finally 统一清 isTyping /
-            // KeepAlive / 跑 memory palace 后处理，与本地路径完全对齐。
-            // worker 端跑完 LLM → push → SW → activeMsgRuntime.flushInboxToChat 写 DB 并刷 UI。
-            // 瑞幸聊天点单 / 麦当劳 / 瑞幸小程序 这些"客户端工具循环"模式必须走本地 fetch:
-            // instant push 会把请求交给 worker 并在这里提前 return, 工具循环(callLuckinTool 等)根本跑不到,
-            // 表现就是"选了城市也没用 / 角色不下单"。这些模式下跳过 instant push, 用本地 fetch 跑工具循环。
-            if (isInstantConfigReady() && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive) {
-                const instantResult = await sendInstantPushAndAwaitReply({
-                    contactName: char.name,
-                    messages: fullMessages as InstantPushPayload['messages'],
-                    apiUrl: effectiveApi.baseUrl,
-                    apiKey: effectiveApi.apiKey,
-                    primaryModel: effectiveApi.model,
-                    maxTokens: 8000,
-                    temperature: userTemp,
-                    // amsg-instant 0.6+ 端 validateAvatarUrl 拒 data: / >2KB,
-                    // 这里按 contract 只传 https URL, data URL 本地头像直接不传
-                    // (SW 显示通知时回退到默认 app icon, 不影响推送成功率).
-                    avatarUrl: /^https?:\/\//i.test(char.avatar || '') ? char.avatar : undefined,
-                    metadata: { source: 'sullyos-chat', charId: char.id },
-                    // 副 API 情绪评估: worker 跑完主回复后用这套跑 eval, 推 emotion_update 回来 (见 worker 包装层).
-                    // 放顶层字段, 不进 metadata —— 框架不会回显它, 副 API apiKey 不会泄进 push.
-                    ...(instantEmotionEval ? { emotionEval: instantEmotionEval } : {}),
-                }, char.id, undefined, onInstantPosted);
-                if (!instantResult.ok && instantResult.outcome !== 'cancelled') {
-                    // 长报错 (worker 400 校验信息 + CF 错误页可能很长) 走弹窗, 手机用户能
-                    // 看清并复制反馈; 没注入 showError 时降级到 toast.
-                    // 完整诊断由 instantPushClient 的 formatDiagnostics 输出 —— 涵盖
-                    // http (status/bodyBytes/keepalive/cf-ray/response 截断) / fetchError /
-                    // config / subscription / timeout / context / env 各段, 已主动 mask
-                    // worker / api host, 不含 apiKey / apiUrl / workerUrl / push endpoint.
-                    //
-                    // 'cancelled' = pagehide / signal abort, caller 自己取消的, 不弹错。
-                    const errMsg = instantResult.error || '未知错误';
-                    if (showError && instantResult.diagnostics) {
-                        showError(
-                            'Instant Push 发送失败',
-                            formatDiagnostics(instantResult.diagnostics, {
-                                outcome: instantResult.outcome,
-                                reason: errMsg,
-                            }),
-                        );
-                    } else if (showError) {
-                        showError('Instant Push 发送失败', `outcome: ${instantResult.outcome}\nreason: ${errMsg}`);
-                    } else {
-                        addToast(`Instant Push: ${errMsg}`, 'error');
-                    }
-                }
-                return;
-            }
-
-            let data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                method: 'POST', headers,
-                body: JSON.stringify(baseReqBody)
-            }, 2, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天回复' });
-            console.log(`⏱ [API call] ${Math.round(performance.now() - apiT0)}ms`);
-            updateTokenUsage(data, historyMsgCount, 'initial');
-
-            // 3.4 麦当劳小程序 propose_cart_items UI 钩子工具循环
-            //     不调 MCP, 只把模型的 args 作为 mcd_card kind=proposal 落库, 让小程序聊天面板渲染
-            //     成"+加进购物车"卡片。返回 ack 给模型继续走它的文字 reply。
-            if (payload.flags.mcdActive && data.choices?.[0]?.message?.tool_calls?.length) {
-                const MAX_PROPOSE_LOOPS = 3;
-                let loopMessages = [...fullMessages];
-                for (let it = 0; it < MAX_PROPOSE_LOOPS; it++) {
-                    const toolCalls = data.choices?.[0]?.message?.tool_calls;
-                    if (!toolCalls || !toolCalls.length) break;
-                    loopMessages.push({
-                        role: 'assistant',
-                        // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
-                        content: data.choices[0].message.content || '(调用工具中)',
-                        tool_calls: toolCalls,
-                    } as any);
-                    for (const tc of toolCalls) {
-                        const fname: string = tc.function?.name || '';
-                        let args: any = {};
-                        try {
-                            const raw = tc.function?.arguments ?? tc.arguments;
-                            args = typeof raw === 'string' ? (raw ? JSON.parse(raw) : {}) : (raw || {});
-                        } catch (e) {
-                            console.warn('🍔 [MCD-MiniApp] propose 参数解析失败:', e);
-                        }
-                        if (fname === 'propose_cart_items' && Array.isArray(args.items) && args.items.length) {
-                            // 第一步: 菜单还没加载就直接拒, 不能让模型瞎编 code
-                            // 这是导致 calculate-price 返回空列表的根因之一: propose 在 pick 步骤被调用,
-                            // 此时 menuMeals 是空的, 旧版 menuKeys.length===0 会直接跳过校验, 烂 code 一路到 cart。
-                            const menu = mcdMiniSnap?.menuMeals || {};
-                            const menuKeys = Object.keys(menu);
-                            if (menuKeys.length === 0) {
-                                loopMessages.push({
-                                    role: 'tool',
-                                    tool_call_id: tc.id,
-                                    content: `菜单还没加载 (用户当前在选模式 / 选地址门店阶段, 还没进入菜单页)。请先用文字陪用户聊, 等用户在小程序里选完地址/门店、菜单加载出来后再调 propose_cart_items。所有 code 必须从加载后的"当前门店在售"清单里挑, 不能凭印象编。`,
-                                } as any);
-                                continue;
-                            }
-                            // 第二步: 全局名字匹配自动修 code (char 经常把"板烧鸡腿堡"当 code 传)
-                            const { fixed, fixes } = autoFixProposalCodesByName(args.items, menu);
-                            if (fixes.length) {
-                                console.log(`🍔 [MCD-MiniApp] propose 自动修 ${fixes.length} 个 code:`,
-                                    fixes.map(f => `'${f.from}' → '${f.to}' (${f.name})`).join(', '));
-                            }
-                            args.items = fixed;
-                            // 第三步: 修完后还有非法的就退回 char 重提 (严格模式: 任何不在 menu 字典里的 code 都拒)
-                            const invalidItems = args.items.filter((it: any) => !it?.code || !(menu as any)[it.code]);
-                            if (invalidItems.length > 0) {
-                                const sample = menuKeys.slice(0, 20).map(k => `${k}=${(menu as any)[k]?.name || ''}`).join(', ');
-                                const bad = invalidItems.map((i: any) => `'${i.code}'(${i.name || '?'})`).join(', ');
-                                loopMessages.push({
-                                    role: 'tool',
-                                    tool_call_id: tc.id,
-                                    content: `propose_cart_items 里这些 code/name 在菜单里都找不到匹配 (已尝试名字模糊匹配但失败): ${bad}。这些商品本店不卖, 别推。当前菜单可用 code 示例: ${sample}。请只从菜单里挑实际有的, 重新调一次 propose。`,
-                                } as any);
-                                continue;
-                            }
-                            try {
-                                await DB.saveMessage({
-                                    charId: char.id,
-                                    role: 'assistant',
-                                    type: 'mcd_card',
-                                    content: `${args.items.length} 件推荐`,
-                                    metadata: {
-                                        mcdCardKind: 'proposal',
-                                        mcdProposal: args,
-                                        fromMcdMiniApp: true,
-                                    },
-                                } as any);
-                                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-                            } catch (e) {
-                                console.warn('🍔 [MCD-MiniApp] 保存 proposal 失败:', e);
-                            }
-                            const ackExtra = fixes.length
-                                ? ` (我帮你把 ${fixes.length} 个 code 按名字校准到了菜单里真实的 code, 下次 propose 时直接用菜单字典 key 别传名字, 省一步)`
-                                : '';
-                            loopMessages.push({
-                                role: 'tool',
-                                tool_call_id: tc.id,
-                                content: `OK 已把推荐展示给用户, 用户可以点 + 加进购物车${ackExtra}`,
-                            } as any);
-                        } else {
-                            // 未知工具 / 空 items, 给个温和的报错让模型自纠
-                            loopMessages.push({
-                                role: 'tool',
-                                tool_call_id: tc.id,
-                                content: `工具 ${fname} 调用形态不对, 期望 {items: [{code, name, qty, reason?}]}; 你这次给的是 ${JSON.stringify(args).slice(0, 200)}`,
-                            } as any);
-                        }
-                    }
-                    // 让 char 继续生成文字补充 (不再带 tools, 避免无限调)
-                    const followBody = { ...baseReqBody, messages: loopMessages };
-                    delete followBody.tools;
-                    delete followBody.tool_choice;
-                    data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify(followBody)
-                    });
-                    updateTokenUsage(data, historyMsgCount, `mcd-propose-${it + 1}`);
-                    // 第二轮跳过 (我们已经禁用了 tools)
-                    if (!data.choices?.[0]?.message?.tool_calls?.length) break;
-                }
-            }
-
-            // 3.5 瑞幸小程序 propose_cart_items UI 钩子工具循环 (与麦当劳同构)
-            if (payload.flags.luckinActive && data.choices?.[0]?.message?.tool_calls?.length) {
-                const MAX_PROPOSE_LOOPS = 3;
-                let loopMessages = [...fullMessages];
-                for (let it = 0; it < MAX_PROPOSE_LOOPS; it++) {
-                    const toolCalls = data.choices?.[0]?.message?.tool_calls;
-                    if (!toolCalls || !toolCalls.length) break;
-                    loopMessages.push({
-                        role: 'assistant',
-                        // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
-                        content: data.choices[0].message.content || '(调用工具中)',
-                        tool_calls: toolCalls,
-                    } as any);
-                    for (const tc of toolCalls) {
-                        const fname: string = tc.function?.name || '';
-                        let args: any = {};
-                        try {
-                            const raw = tc.function?.arguments ?? tc.arguments;
-                            args = typeof raw === 'string' ? (raw ? JSON.parse(raw) : {}) : (raw || {});
-                        } catch (e) {
-                            console.warn('☕ [Luckin-MiniApp] propose 参数解析失败:', e);
-                        }
-                        if (fname === 'propose_cart_items' && Array.isArray(args.items) && args.items.length) {
-                            const menu = luckinMiniSnap?.menuItems || {};
-                            const menuKeys = Object.keys(menu);
-                            if (menuKeys.length === 0) {
-                                loopMessages.push({
-                                    role: 'tool',
-                                    tool_call_id: tc.id,
-                                    content: `菜单还没加载 (用户当前在选模式 / 选门店阶段)。请先用文字陪用户聊, 等菜单加载出来、出现"当前门店在售"清单后再调 propose_cart_items, code 必须从清单里挑。`,
-                                } as any);
-                                continue;
-                            }
-                            const { fixed, fixes } = autoFixLuckinProposalCodesByName(args.items, menu);
-                            if (fixes.length) {
-                                console.log(`☕ [Luckin-MiniApp] propose 自动修 ${fixes.length} 个 code:`,
-                                    fixes.map(f => `'${f.from}' → '${f.to}' (${f.name})`).join(', '));
-                            }
-                            args.items = fixed;
-                            const invalidItems = args.items.filter((it: any) => !it?.code || !(menu as any)[it.code]);
-                            if (invalidItems.length > 0) {
-                                const sample = menuKeys.slice(0, 20).map(k => `${k}=${(menu as any)[k]?.name || ''}`).join(', ');
-                                const bad = invalidItems.map((i: any) => `'${i.code}'(${i.name || '?'})`).join(', ');
-                                loopMessages.push({
-                                    role: 'tool',
-                                    tool_call_id: tc.id,
-                                    content: `propose_cart_items 里这些 code/name 在菜单里找不到匹配: ${bad}。这些商品本店不卖, 别推。当前菜单可用 code 示例: ${sample}。请只从菜单里挑实际有的, 重新调一次 propose。`,
-                                } as any);
-                                continue;
-                            }
-                            try {
-                                await DB.saveMessage({
-                                    charId: char.id,
-                                    role: 'assistant',
-                                    type: 'luckin_card',
-                                    content: `${args.items.length} 件推荐`,
-                                    metadata: {
-                                        luckinCardKind: 'proposal',
-                                        luckinProposal: args,
-                                        fromLuckinMiniApp: true,
-                                    },
-                                } as any);
-                                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-                            } catch (e) {
-                                console.warn('☕ [Luckin-MiniApp] 保存 proposal 失败:', e);
-                            }
-                            const ackExtra = fixes.length
-                                ? ` (我帮你把 ${fixes.length} 个 code 按名字校准到了菜单里真实的 code)`
-                                : '';
-                            loopMessages.push({
-                                role: 'tool',
-                                tool_call_id: tc.id,
-                                content: `OK 已把推荐展示给用户, 用户可以点 + 加进购物车${ackExtra}`,
-                            } as any);
-                        } else {
-                            loopMessages.push({
-                                role: 'tool',
-                                tool_call_id: tc.id,
-                                content: `工具 ${fname} 调用形态不对, 期望 {items: [{code, name, qty, reason?}]}; 你这次给的是 ${JSON.stringify(args).slice(0, 200)}`,
-                            } as any);
-                        }
-                    }
-                    const followBody = { ...baseReqBody, messages: loopMessages };
-                    delete followBody.tools;
-                    delete followBody.tool_choice;
-                    data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify(followBody)
-                    });
-                    updateTokenUsage(data, historyMsgCount, `luckin-propose-${it + 1}`);
-                    if (!data.choices?.[0]?.message?.tool_calls?.length) break;
-                }
-            }
-
-            // 3.6 瑞幸聊天点单: 角色直接调真实 8 工具 (queryShopList → searchProductForMcp →
-            //     switchProduct → previewOrder)。结果落 luckin_card; previewOrder 落"结账卡"(可改量+扫码付);
-            //     createOrder 被拦截 —— 下单付款必须用户在结账卡上点。
-            if (payload.flags.luckinChatActive && data.choices?.[0]?.message?.tool_calls?.length) {
-                const MAX_LOOPS = 6;
-                let loopMessages = [...fullMessages];
-                const loc = luckinChatRef?.current;
-                for (let it = 0; it < MAX_LOOPS; it++) {
-                    const toolCalls = data.choices?.[0]?.message?.tool_calls;
-                    if (!toolCalls || !toolCalls.length) break;
-                    loopMessages.push({
-                        role: 'assistant',
-                        // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
-                        content: data.choices[0].message.content || '(调用工具中)',
-                        tool_calls: toolCalls,
-                    } as any);
-                    for (const tc of toolCalls) {
-                        const fname: string = tc.function?.name || '';
-                        let args: any = {};
-                        try {
-                            const raw = tc.function?.arguments ?? tc.arguments;
-                            args = typeof raw === 'string' ? (raw ? JSON.parse(raw) : {}) : (raw || {});
-                        } catch (e) {
-                            console.warn('☕ [Luckin-Chat] 工具参数解析失败:', e);
-                        }
-                        // 经纬度兜底: 角色漏传就用激活时抓到的定位补上
-                        if (/queryShopList|createOrder/i.test(fname) && loc) {
-                            if (args.longitude == null && loc.longitude != null) args.longitude = loc.longitude;
-                            if (args.latitude == null && loc.latitude != null) args.latitude = loc.latitude;
-                        }
-                        // 拦截 createOrder: 不真下单, 引导走结账卡
-                        if (/create[-_]?order/i.test(fname)) {
-                            loopMessages.push({
-                                role: 'tool',
-                                tool_call_id: tc.id,
-                                content: '下单与支付由用户在结账卡上完成, 你不要调 createOrder。若还没出结账卡, 请先调 previewOrder 把订单算价展示出来, 然后用角色语气让用户去卡片上确认支付。',
-                            } as any);
-                            continue;
-                        }
-                        let result: any;
-                        try { result = await callLuckinTool(fname, args); }
-                        catch (e: any) { result = { success: false, error: e?.message || String(e) }; }
-
-                        const isPreview = /preview[-_]?order/i.test(fname);
-                        try {
-                            await DB.saveMessage({
-                                charId: char.id,
-                                role: 'assistant',
-                                type: 'luckin_card',
-                                content: fname,
-                                metadata: {
-                                    luckinToolName: fname,
-                                    luckinToolArgs: args,
-                                    luckinToolResult: result.success ? result.data : undefined,
-                                    luckinToolError: result.success ? undefined : result.error,
-                                    luckinToolRawText: result.rawText,
-                                    luckinCardKind: isPreview ? 'checkout' : inferLuckinCardKind(fname),
-                                    luckinLoc: (loc && loc.longitude != null) ? { longitude: loc.longitude, latitude: loc.latitude } : undefined,
-                                },
-                            } as any);
-                            setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-                        } catch (e) { console.warn('☕ [Luckin-Chat] 存卡片失败:', e); }
-
-                        const toolMsg = result.success
-                            ? `工具 ${fname} 成功。结果(截断): ${(() => { try { return JSON.stringify(result.data).slice(0, 1500); } catch { return String(result.data).slice(0, 800); } })()}`
-                            : `工具 ${fname} 失败: ${result.error}`;
-                        loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: toolMsg } as any);
-                    }
-                    // 继续让角色多步推进 (保留 tools, 允许 query→search→preview 连续走)
-                    const followBody = { ...baseReqBody, messages: loopMessages };
-                    data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                        method: 'POST', headers,
-                        body: JSON.stringify(followBody)
-                    });
-                    updateTokenUsage(data, historyMsgCount, `luckin-chat-${it + 1}`);
-                }
-            }
-
-            // DEBUG: Log full API response details for troubleshooting truncation issues
-            console.log('🔍 [API Response Debug]', JSON.stringify({
-                finish_reason: data.choices?.[0]?.finish_reason,
-                usage: data.usage,
-                content_length: data.choices?.[0]?.message?.content?.length,
-                raw_content: data.choices?.[0]?.message?.content,
-                reasoning_content: data.choices?.[0]?.message?.reasoning_content,
-                reasoning_content_length: data.choices?.[0]?.message?.reasoning_content?.length,
-                model: data.model,
-                id: data.id,
-            }, null, 2));
-
-            // ─── 后处理管线 (13 步) ───
-            // 详见 utils/applyAssistantPostProcessing.ts。Phase 0 行为字节级不变;
-            // Phase 1 会让 instant push 路径也调它 (skipSecondPassLLM=true);
-            // Phase 2 会让 worker 端把识别的副作用打包成 directives 传过来重放。
-            const rawAiContent = data.choices?.[0]?.message?.content || '';
             const xhsCaches: XhsCaches = {
                 xsecTokenCache: xsecTokenCacheRef.current,
                 noteTitleCache: noteTitleCacheRef.current,
@@ -1172,21 +750,21 @@ export const useChatAI = ({
                 commentAuthorNameCache: commentAuthorNameCacheRef.current,
                 commentParentIdCache: commentParentIdCacheRef.current,
             };
-            await applyAssistantPostProcessing(rawAiContent, {
+            await applyAssistantPostProcessing(result.content, {
                 char,
                 userProfile,
                 emojis,
                 realtimeConfig,
                 contextMsgs,
                 fullMessages,
-                initialData: data,
+                initialData: agentData,
                 historyMsgCount,
                 mcdInheritMeta,
                 xhsCaches,
                 api: {
-                    baseUrl,
-                    headers,
-                    effectiveApi,
+                    baseUrl: effectiveAgent.agentServerUrl,
+                    headers: { 'Content-Type': 'application/json' },
+                    effectiveApi: { baseUrl: effectiveAgent.agentServerUrl, apiKey: '', model: effectiveAgent.model || 'sonnet' },
                 },
                 hooks: {
                     setMessages,
@@ -1196,25 +774,26 @@ export const useChatAI = ({
                     setDiaryStatus,
                     setXhsStatus,
                     updateTokenUsage,
-                    // 整组 musicHooks 由 MusicProvider 注册到模块级 slot, 本地 fetch 路径和
-                    // instant push 路径 (activeMsgRuntime) 共享同一份, 见 MusicContext.loadMusicHooks.
                     musicHooks: loadMusicHooks() ?? undefined,
                 },
-                // Phase 0: 本地 fetch 路径保持原逻辑, 不跳 2nd-pass LLM, 也没有结构化 directives。
-                skipSecondPassLLM: false,
+                skipSecondPassLLM: true,
                 directives: [],
             });
+            return;
+            }
+
+            // Claude Agent SDK migration: legacy browser-side chat completion, Instant Push,
+            // emotion eval, and OpenAI tool loops are intentionally removed from
+            // the main chat path. Agent post-processing already ran above.
 
         } catch (e: any) {
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
             // 13 步)。这里抛错多半不是网络问题, 而是解析/正则/落库异常。别再叫"连接中断"误导排查。
             const errMsg = e?.message || String(e);
-            // 瑞一杯模式下报错: 大概率是聊天模型/中转不支持 function calling(tools) → 带 tools 一发就 400。
-            // 在 APK 里看不到控制台, 这里把完整原因 + 解法存成可读消息, 方便排查。
             if (luckinChatRef?.current?.active && /\b400\b|tool|function[_\s-]?call/i.test(errMsg)) {
                 await DB.saveMessage({
                     charId: char.id, role: 'system', type: 'text',
-                    content: `[瑞一杯失败] ${errMsg}\n\n大概率是你当前聊天用的「模型/中转」不支持函数调用(function calling / tools)——瑞一杯靠角色自己调工具点单, 模型不支持就会直接报 400。\n解决: 换一个支持 tools 的模型/中转 (如官方 OpenAI / Claude / 多数主流中转)。\n另外确认: APK 是全新存储, 你的聊天 API 配置(密钥/地址/模型)在 APK 里填好了吗?`,
+                    content: `[瑞一杯失败] ${errMsg}\n\nClaude Agent SDK 第一版已禁用浏览器侧 tool_calls。请先把主聊天链路跑通；点单工具会在后续迁移到 Agent Server custom tools。`,
                 });
             } else {
                 await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[回复处理失败: ${errMsg}]` });
@@ -1228,17 +807,15 @@ export const useChatAI = ({
             setDiaryStatus('');
             setXhsStatus('');
 
-            // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
-            // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；
-            // embedding 因端点类型特殊（/embeddings），不做回退，必须显式配置。
+            // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）。
+            // Claude Agent Edition 不再回退主聊天运行时；lightLLM / embedding
+            // 必须作为记忆宫殿的独立服务显式配置，避免主路径偷偷走旧 provider。
             const mpEmb = memoryPalaceConfig?.embedding;
             const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-            const mpLLM = (mpLLMConfigured?.baseUrl)
-                ? mpLLMConfigured
-                : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
+            const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : null;
             // 读 ref 拿到最新的 char 状态；同 id 才信任，否则保守跳过（用户已经切角色了）
             const liveChar = charRef.current?.id === char.id ? charRef.current : null;
-            if (liveChar?.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM.baseUrl) {
+            if (liveChar?.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM?.baseUrl) {
                 const charName = char.name;
                 // 不再预置"正在回味"状态：pipeline 会在水位线未到时立刻 skip，
                 // 预置状态会让"沉思"指示器一闪让用户误以为在干活。

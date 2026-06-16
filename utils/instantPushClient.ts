@@ -1275,8 +1275,8 @@ export async function sendTestInstantPush(
     return { ok: false, error: reason ?? '无法获取推送订阅' };
   }
 
-  // amsg-instant 0.4.0+ runs normalizeAiApiUrl Worker-side; we can forward
-  // apiConfig.baseUrl as-is (root / /v1 / full /chat/completions all accepted).
+  // Claude Agent SDK mode disables worker-side model calls; keep test push on
+  // notification plumbing only.
   //
   // metadata.test = true 让 SW push handler 绕过"前台跳过 showNotification"
   // 逻辑 — 测试就是要看到通知, 不能被前台静默吃掉.

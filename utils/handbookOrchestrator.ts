@@ -117,7 +117,7 @@ async function callLLM(
 ): Promise<string | null> {
     try {
         const t0 = Date.now();
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
             body: JSON.stringify({

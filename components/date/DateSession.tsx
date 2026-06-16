@@ -170,7 +170,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             if (voiceLang) {
                 const langLabel = VOICE_LANG_LABELS[voiceLang] || voiceLang;
                 try {
-                    const transRes = await fetch(`${apiConfig.baseUrl}/chat/completions`, {
+                    const transRes = await fetch(`${apiConfig.baseUrl}/agent-disabled`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
                         body: JSON.stringify({

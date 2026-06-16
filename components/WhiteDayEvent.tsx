@@ -716,7 +716,7 @@ export const WhiteDaySession: React.FC<WhiteDaySessionProps> = ({ charId, onClos
   ]
 }`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                 body: JSON.stringify({
@@ -844,7 +844,7 @@ ${answerSummary}
   "chocolateDialogue": "（仅当 finalScore >= ${QUIZ_PASS_SCORE} 时填写）告诉 ${userProfile.name} 巧克力做好了，可以去装饰啦！"
 }`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                 body: JSON.stringify({
@@ -928,7 +928,7 @@ ${answerSummary}
 [emotion] "你说的话"
 [emotion] 动作或表情描述`;
 
-            const endpoint = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+            const endpoint = `${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`;
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` };
             let response = await fetch(endpoint, {
                 method: 'POST',
@@ -1330,7 +1330,7 @@ ${answerSummary}
 
             if (apiConfig) {
                 try {
-                    const endpoint = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+                    const endpoint = `${apiConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`;
                     const resp = await fetch(endpoint, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },

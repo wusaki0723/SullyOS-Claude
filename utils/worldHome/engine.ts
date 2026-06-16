@@ -16,12 +16,13 @@
  */
 
 import type {
-    CharacterProfile, UserProfile, GroupProfile, RealtimeConfig, APIConfig,
+    CharacterProfile, UserProfile, GroupProfile, RealtimeConfig,
     WorldProfile, WorldEpisode, WorldCharBeat, WorldCardMeta,
 } from '../../types';
+import type { AgentRuntimeConfig, AgentMessage } from '../../types/agentRuntime';
 import { DB } from '../db';
 import { buildChatRequestPayload } from '../chatRequestPayload';
-import { safeFetchJson } from '../safeApi';
+import { sendAgentMessage } from '../agentClient';
 import { processNewMessages } from '../memoryPalace/pipeline';
 import {
     worldTimeLabel, buildWorldSystemAddendum, buildWorldCharTurn, buildNpcTurn,
@@ -38,7 +39,7 @@ interface MemoryConfigLike {
 export interface WorldEpisodeDeps {
     world: WorldProfile;
     characters: CharacterProfile[];
-    apiConfig: APIConfig;
+    agentRuntimeConfig: AgentRuntimeConfig;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig?: RealtimeConfig;
@@ -54,15 +55,6 @@ export interface WorldEpisodeResult {
 
 const genId = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const running = new Set<string>();
-
-/** 读家园全局 API（设置弹窗写入 localStorage 的 'world_home_api'；不设返回 null）。 */
-function readWorldHomeApiOverride(): { baseUrl: string; apiKey: string; model: string } | null {
-    try {
-        const s = typeof localStorage !== 'undefined' ? localStorage.getItem('world_home_api') : null;
-        const c = s ? JSON.parse(s) : null;
-        return c?.baseUrl ? c : null;
-    } catch { return null; }
-}
 
 export function isWorldRunning(worldId: string): boolean {
     return running.has(worldId);
@@ -195,8 +187,49 @@ function buildCardContent(world: WorldProfile, storyTime: string, beat: WorldCha
     return lines.join('\n');
 }
 
+async function sendWorldAgentTurn(input: {
+    agentRuntimeConfig: AgentRuntimeConfig;
+    userProfile: UserProfile;
+    charId: string;
+    charName?: string;
+    worldId: string;
+    systemPrompt: string;
+    cleanedApiMessages: AgentMessage[];
+    latestUserMessage: string;
+    purpose: string;
+    temperature?: number;
+}): Promise<string> {
+    const cleanedApiMessages = [...input.cleanedApiMessages, { role: 'user' as const, content: input.latestUserMessage }];
+    const fullMessages = [{ role: 'system' as const, content: input.systemPrompt }, ...cleanedApiMessages];
+    const result = await sendAgentMessage(input.agentRuntimeConfig, {
+        userId: input.userProfile.id || input.userProfile.name || 'local-user',
+        charId: `${input.charId}-worldhome`,
+        conversationId: input.worldId,
+        turnId: globalThis.crypto?.randomUUID?.() || `world-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        fullMessages,
+        systemPrompt: input.systemPrompt,
+        cleanedApiMessages,
+        latestUserMessage: input.latestUserMessage,
+        options: {
+            model: input.agentRuntimeConfig.model,
+            maxTurns: input.agentRuntimeConfig.maxTurns ?? 3,
+            temperature: input.temperature ?? 0.9,
+            stream: false,
+            permissionPreset: 'chat-only',
+            enabledTools: [],
+        },
+        meta: {
+            appName: '家园',
+            charName: input.charName,
+            userName: input.userProfile.name,
+            purpose: input.purpose,
+        },
+    });
+    return result.content || '';
+}
+
 export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpisodeResult> {
-    const { world, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, trigger } = deps;
+    const { world, characters, agentRuntimeConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, trigger } = deps;
 
     if (running.has(world.id)) return { ok: false, reason: 'busy' };
 
@@ -205,11 +238,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
         .filter(Boolean) as CharacterProfile[];
     if (members.length === 0) return { ok: false, reason: 'no-members' };
 
-    // API 优先级：世界私有覆盖（旧数据）> 家园全局设置（localStorage）> 全局聊天默认
-    const worldHomeApi = readWorldHomeApiOverride();
-    const api = world.api?.baseUrl ? world.api : (worldHomeApi || apiConfig);
-    if (!api.baseUrl) return { ok: false, reason: 'no-api' };
-    const baseUrl = api.baseUrl.replace(/\/+$/, '');
+    if (!agentRuntimeConfig.agentServerUrl.trim()) return { ok: false, reason: 'no-agent-server' };
 
     // real 模式：演的那一段跟着真实时钟走，且只能补当天错过的段；已追上现实就没东西可演
     const realTarget = world.timeMode !== 'sim' ? realObserveTarget(world) : null;
@@ -293,16 +322,19 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                 });
                 if (directive) consumedDirectiveIds.push(directive.id);
 
-                const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` },
-                    body: JSON.stringify({
-                        model: api.model,
-                        messages: [{ role: 'system', content: systemPrompt }, ...payload.cleanedApiMessages, { role: 'user', content: turn }],
-                        temperature: 0.9, stream: false,
-                    }),
-                }, 2, 0, { appName: '家园', charId: char.id, charName: char.name, purpose: `演绎 · ${world.name}` });
-                const beat = parseCharBeat(data.choices?.[0]?.message?.content || '', char, memberNames, world.npcs.map(n => n.name));
+                const content = await sendWorldAgentTurn({
+                    agentRuntimeConfig,
+                    userProfile,
+                    charId: char.id,
+                    charName: char.name,
+                    worldId: world.id,
+                    systemPrompt,
+                    cleanedApiMessages: payload.cleanedApiMessages,
+                    latestUserMessage: turn,
+                    purpose: `演绎 · ${world.name}`,
+                    temperature: 0.9,
+                });
+                const beat = parseCharBeat(content, char, memberNames, world.npcs.map(n => n.name));
                 beats.push(beat);
                 // 该角色发出的私聊/群聊立刻落线程——后面还没演绎的角色这一轮就能收到并回应
                 applyBeatToThreads(world, beat, members, round, storyTime);
@@ -325,16 +357,18 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                 const recentPostsForNpc = beats.flatMap(b =>
                     (b.phone?.posts || []).map((post, idx) => ({ ref: `${round}_${b.charId}_${idx}`, name: b.charName, post }))
                 ).slice(0, 12);
-                const npcData = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` },
-                    body: JSON.stringify({
-                        model: api.model,
-                        messages: [{ role: 'user', content: buildNpcTurn({ world, members, storyTime, lastSummary, chapterAtmosphere: latestChapter?.atmosphere, inboxes: npcInboxes(world), recentPosts: recentPostsForNpc }) }],
-                        temperature: 0.9, stream: false,
-                    }),
-                }, 2, 0, { appName: '家园', purpose: `NPC世界引擎 · ${world.name}` });
-                const parsed = parseNpcScene(npcData.choices?.[0]?.message?.content || '');
+                const npcContent = await sendWorldAgentTurn({
+                    agentRuntimeConfig,
+                    userProfile,
+                    charId: `${world.id}-npc`,
+                    worldId: world.id,
+                    systemPrompt: '你是 SullyOS 家园的 NPC 世界引擎。只输出要求的 JSON 内容。',
+                    cleanedApiMessages: [],
+                    latestUserMessage: buildNpcTurn({ world, members, storyTime, lastSummary, chapterAtmosphere: latestChapter?.atmosphere, inboxes: npcInboxes(world), recentPosts: recentPostsForNpc }),
+                    purpose: `NPC世界引擎 · ${world.name}`,
+                    temperature: 0.9,
+                });
+                const parsed = parseNpcScene(npcContent);
                 npcScene = parsed.scene || undefined;
                 npcHooks = parsed.hooks;
                 // 群聊冒泡 + 回复成员私信（落线程，角色下一轮接住）
@@ -400,7 +434,7 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
                     .filter(e => e.round > fromClock && e.round <= newClock);
                 dispatch('world-chapter-start', { worldId: world.id, index });
                 const chapter = await summarizeChapter({
-                    world: updatedWorld, members, episodes: windowEpisodes, api: { baseUrl, apiKey: api.apiKey || '', model: api.model },
+                    world: updatedWorld, members, episodes: windowEpisodes, agentRuntimeConfig,
                     fromClock, toClock: newClock,
                     fromLabel: worldTimeLabel(updatedWorld, fromClock),
                     toLabel: worldTimeLabel(updatedWorld, Math.max(fromClock, newClock - 1)),
@@ -461,8 +495,8 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
             try {
                 const mpEmb = memoryPalaceConfig?.embedding;
                 const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-                const mpLLM = (mpLLMConfigured?.baseUrl) ? mpLLMConfigured : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
-                if (mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM.baseUrl) {
+                const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : undefined;
+                if (mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM?.baseUrl) {
                     for (const beat of beats) {
                         const char = members.find(m => m.id === beat.charId);
                         if (!char?.memoryPalaceEnabled) continue;
@@ -493,16 +527,13 @@ export async function runWorldEpisode(deps: WorldEpisodeDeps): Promise<WorldEpis
 export async function rerollWorldCharBeat(
     deps: WorldEpisodeDeps & { episodeId: string; charId: string; direction?: string },
 ): Promise<WorldEpisodeResult> {
-    const { world, characters, apiConfig, userProfile, groups, realtimeConfig, episodeId, charId, direction } = deps;
+    const { world, characters, agentRuntimeConfig, userProfile, groups, realtimeConfig, episodeId, charId, direction } = deps;
     if (running.has(world.id)) return { ok: false, reason: 'busy' };
     const members = world.memberIds.map(id => characters.find(c => c.id === id)).filter(Boolean) as CharacterProfile[];
     const char = members.find(m => m.id === charId);
     if (!char) return { ok: false, reason: 'no-char' };
     const memberNames = members.map(m => m.name);
-    const worldHomeApi = readWorldHomeApiOverride();
-    const api = world.api?.baseUrl ? world.api : (worldHomeApi || apiConfig);
-    if (!api.baseUrl) return { ok: false, reason: 'no-api' };
-    const baseUrl = api.baseUrl.replace(/\/+$/, '');
+    if (!agentRuntimeConfig.agentServerUrl.trim()) return { ok: false, reason: 'no-agent-server' };
 
     const episodes = await DB.getWorldEpisodes(world.id, 30);
     const episode = episodes.find(e => e.id === episodeId);
@@ -540,16 +571,19 @@ export async function rerollWorldCharBeat(
         if (direction && direction.trim()) {
             turn += `\n\n## 重写方向（用户希望这次往这个方向重演，请据此给出全新的一拍）\n${direction.trim()}`;
         }
-        const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` },
-            body: JSON.stringify({
-                model: api.model,
-                messages: [{ role: 'system', content: systemPrompt }, ...payload.cleanedApiMessages, { role: 'user', content: turn }],
-                temperature: 0.95, stream: false,
-            }),
-        }, 2, 0, { appName: '家园', charId: char.id, charName: char.name, purpose: `重演 · ${world.name}` });
-        const beat = parseCharBeat(data.choices?.[0]?.message?.content || '', char, memberNames, world.npcs.map(n => n.name));
+        const content = await sendWorldAgentTurn({
+            agentRuntimeConfig,
+            userProfile,
+            charId: char.id,
+            charName: char.name,
+            worldId: world.id,
+            systemPrompt,
+            cleanedApiMessages: payload.cleanedApiMessages,
+            latestUserMessage: turn,
+            purpose: `重演 · ${world.name}`,
+            temperature: 0.95,
+        });
+        const beat = parseCharBeat(content, char, memberNames, world.npcs.map(n => n.name));
 
         const newBeats = hadBeat ? episode.beats.map(b => b.charId === charId ? beat : b) : [...episode.beats, beat];
         const stillFailed = (episode.failedCharIds || []).filter(id => id !== charId);

@@ -413,7 +413,7 @@ pinDays 仅在需要置顶时才写，大多数记忆不需要。
 
     try {
         const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
             {
                 method: 'POST',
                 headers: {

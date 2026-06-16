@@ -454,82 +454,33 @@ const cfWorker = createCloudflareWorker((env: Env) => {
 });
 
 /**
- * 副 API 情绪评估 (worker 端). 框架的 onLLMOutput hook 故意不暴露 apiKey、也不允许自己发 LLM/push
- * (见 amsg-instant SessionContext 文档), 所以情绪评估的第二次 LLM 调用
- * 在 onBeforeLoop 并行启动，在 onAfterLoop 里用 deliver (SSE/Push) 追加推送.
- *
- * 失败全吞 (情绪评估失败不该影响主回复); emotion_update 携带静默 notification 属性防系统拉黑，客户端仍静默入 inbox。.
+ * Claude Agent SDK first pass: worker-side emotion eval is disabled. The Agent
+ * SDK requires a Node runtime and must run in sully-agent-server, not inside a
+ * Cloudflare Worker.
  */
 async function runEmotionEval(body: any): Promise<string> {
-  const ee = body?.emotionEval;
-  if (!ee?.prompt || !ee?.api?.baseUrl || !ee?.api?.apiKey || !ee?.api?.model) {
-    return '';
-  }
+  return '';
+}
 
-  const charId = (body?.metadata && typeof body.metadata === 'object') ? body.metadata.charId : '';
-  // 情绪评估 = 单条 user 消息, 与本地 buildEmotionEvalPrompt 输出**逐字对齐**. 客户端把 prompt 里
-  // 两段大文本 (system prompt、对话历史) 留成占位符, 这里用本次请求已有的 messages 还原后替换回原位:
-  //   - body.messages[0] (role=system) = 本地的 mainSystemPrompt
-  //   - body.messages[1..]             = 本地的 cleanedApiMessages → 同格式拼成 recentLines
-  // 这样上下文不必在请求体里重复发 (keepalive 不被降级), 评估质量/顺序与本地完全一致.
-  const priorMessages = Array.isArray(body?.messages) ? body.messages : [];
-  const contactName = body?.contactName || '角色';
-  const flattenContent = (content: any): string => {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((p: any) => (p?.type === 'text' ? (p.text || '') : (p?.type === 'image_url' ? '[图片]' : '')))
-        .filter(Boolean)
-        .join(' ');
-    }
-    return '';
-  };
-  let systemPromptText = '';
-  let conversation = priorMessages;
-  if (priorMessages.length > 0 && priorMessages[0]?.role === 'system') {
-    systemPromptText = flattenContent(priorMessages[0].content);
-    conversation = priorMessages.slice(1);
-  }
-  // 与本地 recentLines 完全同格式: `[用户]: ...` / `[角色名]: ...` / `[系统]: ...`, 用 \n 连接.
-  const recentLines = conversation
-    .map((m: any) => {
-      const role = m.role === 'user' ? '用户' : (m.role === 'assistant' ? contactName : '系统');
-      return `[${role}]: ${flattenContent(m.content)}`;
-    })
-    .join('\n');
-  // 用函数式 replacer: 避免 systemPrompt / 对话里出现 $&、$1 等被 String.replace 当成替换模式解析.
-  const evalContent = String(ee.prompt)
-    .replace('__EMOTION_EVAL_SYSTEM_PROMPT__', () => systemPromptText)
-    .replace('__EMOTION_EVAL_HISTORY__', () => recentLines);
-  const evalMessages = [{ role: 'user', content: evalContent }];
-  try {
-    const baseUrl = String(ee.api.baseUrl).replace(/\/+$/, '');
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ee.api.apiKey || 'sk-none'}`,
-      },
-      body: JSON.stringify({
-        model: ee.api.model,
-        messages: evalMessages,
-        temperature: 0.85,
-        stream: false,
-      }),
-    });
-    let raw = '';
-    if (res.ok) {
-      const data: any = await res.json();
-      raw = data?.choices?.[0]?.message?.content || '';
-    } else {
-      console.error('[emotion-eval] LLM call failed', res.status);
-    }
+function looksLikeLegacyInstantAiPayload(body: any): boolean {
+  if (!body || typeof body !== 'object') return false;
+  return Boolean(body.apiUrl || body.apiKey || body.primaryModel || Array.isArray(body.messages));
+}
 
-    return raw;
-  } catch (e) {
-    console.error('[emotion-eval] failed', e);
-    return '';
-  }
+function legacyInstantAiDisabledResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'INSTANT_PUSH_AGENT_MODE_DISABLED',
+      message: 'Claude Agent SDK mode does not support worker-side model execution. Keep SullyOS open and let the frontend talk to sully-agent-server.',
+    },
+  }), {
+    status: 501,
+    headers: {
+      ...UTILITY_CORS_HEADERS,
+      'Content-Type': 'application/json',
+    },
+  });
 }
 
 /**
@@ -629,6 +580,9 @@ export default {
       body = await decodedRequest.clone().json();
     } catch {
       body = null; // 非 JSON / 解析失败: 不影响主路径
+    }
+    if (looksLikeLegacyInstantAiPayload(body)) {
+      return legacyInstantAiDisabledResponse();
     }
     const requestedEnv = withRequestOversizeTransport({ ...env }, body);
     const workerEnv = await prepareBlobStoreEnv(requestedEnv);

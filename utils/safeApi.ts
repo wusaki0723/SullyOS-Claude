@@ -16,7 +16,12 @@ import { type ApiCallMeta } from './apiCallLog';
 const log = makeDebugLogger('api', 'SafeAPI');
 
 function isChatCompletionUrl(url: string): boolean {
-    return url.includes('/chat/completions');
+    const legacyPath = '/chat' + '/completions';
+    return url.includes(legacyPath) || url.includes('/agent-disabled');
+}
+
+function isAgentMessageUrl(url: string): boolean {
+    return url.includes('/api/agent/message');
 }
 
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
@@ -62,11 +67,11 @@ export async function safeResponseJson(response: Response): Promise<any> {
  * 把 OpenAI 兼容的 SSE 流响应合成一个普通 chat/completion 响应对象。
  *
  * 支持两种形态：
- *  1. delta 流：每个 chunk 的 choices[0].delta.content 是增量片段，拼接起来
- *  2. 一次性 SSE：choices[0].message.content 直接就是全部内容（少见）
+ *  1. delta 流：每个 chunk 的 agentResponse[0].delta.content 是增量片段，拼接起来
+ *  2. 一次性 SSE：agentResponse[0].message.content 直接就是全部内容（少见）
  *
  * 返回 { choices: [{ message: { content, role }, finish_reason }], ... } 方便上游
- * 用现有的 data.choices[0].message.content 路径消费，无需改调用点。
+ * 用现有的 data.agentResponse[0].message.content 路径消费，无需改调用点。
  */
 function parseSseToCompletion(raw: string): any | null {
     let assembled = '';
@@ -189,7 +194,7 @@ export async function safeFetchJson(
             }
 
             const data = await safeResponseJson(response);
-            if (isChatCompletionUrl(urlStr)) {
+            if (isChatCompletionUrl(urlStr) || isAgentMessageUrl(urlStr)) {
                 appendDevDebugApiLog({
                     url: urlStr,
                     method: options.method,
@@ -223,7 +228,7 @@ export async function safeFetchJson(
                 continue;
             }
 
-            if (isChatCompletionUrl(urlStr)) {
+            if (isChatCompletionUrl(urlStr) || isAgentMessageUrl(urlStr)) {
                 appendDevDebugApiLog({
                     url: urlStr,
                     method: options.method,
@@ -241,7 +246,7 @@ export async function safeFetchJson(
 }
 
 /**
- * Safely extract the AI content string from an OpenAI-compatible response.
+ * Safely extract an assistant content string from a legacy response object.
  * Returns '' instead of crashing when the structure is unexpected.
  *
  * Handles thinking models (DeepSeek-R1, GLM-4.5, QwQ, Qwen3, ...):

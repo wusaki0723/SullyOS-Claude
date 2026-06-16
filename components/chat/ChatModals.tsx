@@ -1,9 +1,9 @@
 
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
-import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
+import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot } from '../../types';
+import type { AgentPermissionPreset, AgentRuntimeConfig } from '../../types/agentRuntime';
 import ScheduleCard from '../schedule/ScheduleCard';
-import EmotionSettingsPanel from './EmotionSettingsPanel';
 
 interface ChatModalsProps {
     modalType: string;
@@ -19,6 +19,8 @@ interface ChatModalsProps {
     setSettingsHideSysLogs: (v: boolean) => void;
     preserveContext: boolean;
     setPreserveContext: (v: boolean) => void;
+    resetAgentOnClear: boolean;
+    setResetAgentOnClear: (v: boolean) => void;
     editContent: string;
     setEditContent: (v: string) => void;
     
@@ -112,11 +114,11 @@ interface ChatModalsProps {
     isMemoryPalaceEnabled?: boolean;
     isVectorizing?: boolean;
     onForceVectorize?: () => void;
-    // Emotion (embedded under schedule modal, synced on/off with scheduleStyle)
-    apiPresets?: ApiPreset[];
-    onAddApiPreset?: (name: string, config: APIConfig) => void;
-    onSaveEmotion?: (config: NonNullable<CharacterProfile['emotionConfig']>) => void;
-    onClearBuffs?: () => void;
+    // Claude Agent runtime
+    agentRuntimeConfig?: AgentRuntimeConfig;
+    onAgentPermissionPresetChange?: (preset: AgentPermissionPreset) => void;
+    onResetAgentSession?: () => void | Promise<void>;
+    isResettingAgentSession?: boolean;
 }
 
 const ChatModals: React.FC<ChatModalsProps> = ({
@@ -126,6 +128,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     settingsContextLimit, setSettingsContextLimit,
     settingsHideSysLogs, setSettingsHideSysLogs,
     preserveContext, setPreserveContext,
+    resetAgentOnClear, setResetAgentOnClear,
     editContent, setEditContent,
     newCategoryName, setNewCategoryName, onAddCategory,
     archivePrompts, selectedPromptId, setSelectedPromptId,
@@ -147,7 +150,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     onScheduleStyleChange,
     isScheduleFeatureEnabled, onToggleScheduleFeature,
     isMemoryPalaceEnabled, isVectorizing, onForceVectorize,
-    apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
+    agentRuntimeConfig, onAgentPermissionPresetChange, onResetAgentSession, isResettingAgentSession,
 }) => {
     const bgInputRef = useRef<HTMLInputElement>(null);
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
@@ -293,6 +296,46 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                          <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">上下文条数 ({settingsContextLimit})</label>
                          <input type="range" min="20" max="5000" step="10" value={settingsContextLimit} onChange={e => setSettingsContextLimit(parseInt(e.target.value))} className="w-full h-2 bg-slate-200 rounded-full appearance-none accent-primary" />
                          <div className="flex justify-between text-[10px] text-slate-400 mt-1"><span>20 (省流)</span><span>5000 (超长记忆)</span></div>
+                     </div>
+
+                     <div className="pt-2 border-t border-slate-100">
+                         <div className="flex items-center justify-between gap-3 mb-3">
+                             <div>
+                                 <label className="text-xs font-bold text-slate-400 uppercase block">Claude Agent Session</label>
+                                 <p className="text-[10px] text-slate-400 mt-1">每个角色独立 cwd 和 Claude session。</p>
+                             </div>
+                             <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-full font-bold">
+                                 {activeCharacter.agentRuntime?.permissionPreset || agentRuntimeConfig?.permissionPreset || 'chat-only'}
+                             </span>
+                         </div>
+                         <div className="bg-slate-50 border border-slate-100 rounded-2xl p-3 space-y-3">
+                             <div>
+                                 <div className="text-[10px] font-bold text-slate-400 uppercase mb-1">Session ID</div>
+                                 <div className="font-mono text-[11px] text-slate-600 break-all">
+                                     {activeCharacter.agentRuntime?.sessionId || '尚未建立'}
+                                 </div>
+                             </div>
+                             <div>
+                                 <div className="text-[10px] font-bold text-slate-400 uppercase mb-1">Permission Preset</div>
+                                 <select
+                                     value={activeCharacter.agentRuntime?.permissionPreset || agentRuntimeConfig?.permissionPreset || 'chat-only'}
+                                     onChange={(event) => onAgentPermissionPresetChange?.(event.target.value as AgentPermissionPreset)}
+                                     className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700"
+                                 >
+                                     <option value="chat-only">chat-only</option>
+                                     <option value="read-only-tools">read-only-tools</option>
+                                     <option value="custom-tools">custom-tools</option>
+                                 </select>
+                             </div>
+                             <button
+                                 type="button"
+                                 onClick={() => void onResetAgentSession?.()}
+                                 disabled={isResettingAgentSession}
+                                 className="w-full py-2.5 rounded-xl bg-rose-50 text-rose-600 text-xs font-bold border border-rose-100 active:scale-95 transition-transform disabled:opacity-50"
+                             >
+                                 {isResettingAgentSession ? '重置中...' : '重置该角色 Claude session'}
+                             </button>
+                         </div>
                      </div>
 
                      <div className="pt-2 border-t border-slate-100">
@@ -475,6 +518,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                  {preserveContext && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                              </div>
                              <span className="text-sm text-slate-600">清空时保留最后10条记录 (维持语境)</span>
+                         </div>
+                         <div className="flex items-center gap-2 mb-3 cursor-pointer" onClick={() => setResetAgentOnClear(!resetAgentOnClear)}>
+                             <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors ${resetAgentOnClear ? 'bg-rose-500 border-rose-500' : 'bg-slate-100 border-slate-300'}`}>
+                                 {resetAgentOnClear && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                             </div>
+                             <span className="text-sm text-slate-600">同时重置 Claude Agent session</span>
                          </div>
                          <button onClick={onClearHistory} className="w-full py-3 bg-red-50 text-red-500 font-bold rounded-2xl border border-red-100 active:scale-95 transition-transform flex items-center justify-center gap-2">
                              执行清空
@@ -927,16 +976,9 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                 点击日程项可编辑 · 长按可删除
                             </p>
 
-                            {/* 情绪 / 意识流 API — 与日程强制同步 */}
-                            {activeCharacter && apiPresets && onAddApiPreset && onSaveEmotion && onClearBuffs && (
-                                <EmotionSettingsPanel
-                                    char={activeCharacter}
-                                    apiPresets={apiPresets}
-                                    addApiPreset={onAddApiPreset}
-                                    onSave={onSaveEmotion}
-                                    onClearBuffs={onClearBuffs}
-                                />
-                            )}
+                            <div className="rounded-2xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-[10px] leading-relaxed text-amber-700">
+                                Claude Agent SDK 第一版已停用独立情绪评估；后续会迁移到 Agent Server 的一次性情绪接口。
+                            </div>
                         </>
                     )}
                 </div>

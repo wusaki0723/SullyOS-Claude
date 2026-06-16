@@ -56,7 +56,7 @@ const callLlm = async (
     userMessage: string,
 ): Promise<string> => {
     const baseUrl = apiConfig.baseUrl.replace(/\/+$/, '');
-    const resp = await fetch(`${baseUrl}/chat/completions`, {
+    const resp = await fetch(`${baseUrl}/agent-disabled`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',

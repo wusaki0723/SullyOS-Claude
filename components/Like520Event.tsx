@@ -3594,7 +3594,7 @@ const Like520InlineApiSetup: React.FC<{ onDone: () => void; onBack: () => void }
         setTesting(true);
         setTestResult(null);
         try {
-            const res = await fetch(`${localUrl.trim().replace(/\/+$/, '')}/chat/completions`, {
+            const res = await fetch(`${localUrl.trim().replace(/\/+$/, '')}/agent-disabled`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
                 body: JSON.stringify({

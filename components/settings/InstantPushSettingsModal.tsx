@@ -584,9 +584,9 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
           {testStatus && (
             <p className={`text-[11px] text-center ${testStatusColor}`}>{testStatus}</p>
           )}
-          {!apiConfig.baseUrl && (
-            <p className="text-[11px] text-amber-600 text-center">请先在 Settings → API 配置 Chat API，测试推送会复用它</p>
-          )}
+          <p className="text-[11px] text-amber-600 text-center">
+            Claude Agent SDK 模式暂不支持 Worker 侧模型回复；测试推送只验证通知通道，不会调用 Agent Server。
+          </p>
           <p className="text-[11px] text-slate-400 text-center leading-relaxed">
             测试推送带 <code>metadata.test=true</code> 标记，SW 收到后即使 app 在前台也会强制弹系统通知 —— 真实消息照旧前台静默由 in-app UI 兜底。
           </p>

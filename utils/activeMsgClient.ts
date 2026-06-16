@@ -94,7 +94,7 @@ export const sanitizeActiveMsgDatabaseUrl = (value: string) => {
     .trim();
 };
 
-const normalizeChatApiUrl = (baseUrl: string) => `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+const normalizeChatApiUrl = (_baseUrl: string) => 'claude-agent-sdk-disabled';
 
 const buildActiveMsgApiHint = () => {
   const apiBase = resolveActiveMsgApiBase();
@@ -580,7 +580,6 @@ export const ActiveMsgClient = {
     return response.data as { uuid: string; status: string; nextSendAt?: string };
   },
 };
-
 
 
 

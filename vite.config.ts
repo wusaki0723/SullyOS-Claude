@@ -64,7 +64,13 @@ export default defineConfig({
     drop: ['debugger'],
   },
   server: {
+    allowedHosts: ['desktop.saki0723.fun'],
     proxy: {
+      '/api/agent': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+        secure: false,
+      },
       '/api/minimax/t2a': {
         target: 'https://api.minimaxi.com',
         changeOrigin: true,

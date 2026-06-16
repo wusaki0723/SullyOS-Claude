@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { processImage } from '../utils/file';
 import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentText } from '../utils/agentClient';
 import Modal from '../components/os/Modal';
 import { Camera, ImageSquare, GlobeSimple, MagnifyingGlass, Lightning } from '@phosphor-icons/react';
 
@@ -112,7 +113,7 @@ const WebRenderer: React.FC<{ content: string }> = ({ content }) => {
 };
 
 const BrowserApp: React.FC = () => {
-    const { closeApp, apiConfig, addToast } = useOS();
+    const { closeApp, agentRuntimeConfig, addToast } = useOS();
     
     // Browser State
     const [urlInput, setUrlInput] = useState('');
@@ -218,8 +219,8 @@ const BrowserApp: React.FC = () => {
     // --- Content Loader ---
 
     const loadPageContent = async (url: string) => {
-        if (!apiConfig.apiKey) {
-            addToast('请先在设置中配置 API Key', 'error');
+        if (!agentRuntimeConfig.agentServerUrl?.trim()) {
+            addToast('请先在设置中配置 Agent Server URL', 'error');
             return;
         }
 
@@ -298,24 +299,18 @@ Generate realistic results linking to hypothetical URLs.`;
                 userPrompt = `Simulate the full webpage content for: "${url}". Make it detailed and realistic.`;
             }
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: userPrompt }
-                    ],
-                    temperature: 0.6,
-                    max_tokens: 4000
-                })
+            const raw = await sendAgentText(agentRuntimeConfig, {
+                userId: 'local-user',
+                charId: 'browser-simulator',
+                conversationId: 'browser-simulator',
+                systemPrompt,
+                prompt: userPrompt,
+                appName: '浏览器',
+                purpose: '模拟网页',
+                temperature: 0.6,
+                maxTurns: 1,
+                permissionPreset: 'chat-only',
             });
-
-            if (!response.ok) throw new Error('Network Error');
-            
-            const data = await safeResponseJson(response);
-            const raw = data.choices[0].message.content;
             
             // Parse Title and Content
             const parts = raw.split('\n');

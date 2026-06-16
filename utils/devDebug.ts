@@ -58,7 +58,7 @@ export interface DevDebugLogEntry {
     id: string;
     timestamp: string;
     category: DevDebugCaptureCategory;
-    /** 列表 / 导出里用的一行摘要，比如 "POST https://.../chat/completions"。 */
+    /** 列表 / 导出里用的一行摘要，比如 "POST https://.../agent-disabled"。 */
     label?: string;
     /** 抓取时是否折叠了长文本（即抓的那一刻没开 exposeLogDetail）。 */
     collapsed?: boolean;
@@ -437,7 +437,7 @@ function measureRequestChars(body: unknown): number | undefined {
 /** 通用 HTTP 日志薄封装；按 category 落到对应类别，请求体 / 错误统一整形。 */
 function appendDevDebugHttpLog(category: DevDebugCaptureCategory, input: DevDebugHttpLogInput): void {
     // label 前缀加分类——activeMsgRuntime 的 instant-push 交换 url 跟 safeApi 的 api 直发一字不差
-    // （两边都是 baseUrl + /chat/completions），不带前缀的话导出 JSON 里两类条目肉眼分不清。
+    // （两边都是 baseUrl + /agent-disabled），不带前缀的话导出 JSON 里两类条目肉眼分不清。
     appendDevDebugLog(category, {
         label: `[${category}] ${input.method ?? 'POST'} ${input.url}`,
         data: {

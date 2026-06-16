@@ -3,11 +3,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { GalleryImage, CharacterProfile } from '../types';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentMessage } from '../utils/agentClient';
 import ConfirmDialog from '../components/os/ConfirmDialog';
 
 const Gallery: React.FC = () => {
-    const { closeApp, characters, apiConfig, addToast } = useOS();
+    const { closeApp, characters, agentRuntimeConfig, addToast } = useOS();
     const [view, setView] = useState<'albums' | 'grid' | 'detail'>('albums');
     const [activeCharId, setActiveCharId] = useState<string | null>(null);
     const [images, setImages] = useState<GalleryImage[]>([]);
@@ -108,7 +108,7 @@ const Gallery: React.FC = () => {
     };
 
     const handleReview = async () => {
-        if (!selectedImage || !activeCharId || !apiConfig.apiKey) {
+        if (!selectedImage || !activeCharId || !agentRuntimeConfig.agentServerUrl?.trim()) {
             addToast('缺少配置或图片信息', 'error');
             return;
         }
@@ -132,69 +132,35 @@ Task: The user sent you a photo. Comment on it briefly (1-3 sentences) based on 
 Style: Casual, conversational, strictly NO AI-assistant tone. React as if you received this on a chat app.
 CRITICAL: Stay in character. If there's conversation context, your comment should naturally fit that context. Don't say anything that would be bizarre given what you two were just talking about.`;
 
-            const payload = {
-                model: apiConfig.model,
-                messages: [
-                    { role: 'system', content: systemContent },
-                    {
-                        role: 'user',
-                        content: [
-                            { type: 'text', text: "Look at this photo I sent you." },
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: selectedImage.url
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens: 8000,
-                temperature: 0.7,
-                stream: false
-            };
-
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiConfig.apiKey}`
+            const userContent = [
+                { type: 'text', text: 'Look at this photo I sent you.' },
+                { type: 'image_url', image_url: { url: selectedImage.url } },
+            ];
+            const result = await sendAgentMessage(agentRuntimeConfig, {
+                userId: 'local-user',
+                charId: `${char.id}-gallery`,
+                conversationId: `${char.id}-gallery`,
+                turnId: (globalThis.crypto?.randomUUID?.() || `gallery-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+                fullMessages: [{ role: 'system', content: systemContent }, { role: 'user', content: userContent }],
+                systemPrompt: systemContent,
+                cleanedApiMessages: [{ role: 'user', content: userContent }],
+                latestUserMessage: 'Look at this photo I sent you.',
+                options: {
+                    model: agentRuntimeConfig.model,
+                    maxTurns: agentRuntimeConfig.maxTurns,
+                    temperature: 0.7,
+                    stream: false,
+                    permissionPreset: 'chat-only',
+                    enabledTools: [],
                 },
-                body: JSON.stringify(payload)
+                meta: { appName: '相册', charName: char.name, purpose: '照片点评' },
             });
 
-            if (!response.ok) {
-                let errorMsg = `HTTP Error ${response.status}`;
-                try {
-                    const errData = await safeResponseJson(response);
-                    errorMsg = errData.error?.message || JSON.stringify(errData.error) || errorMsg;
-                    if (errorMsg.includes('vision') || errorMsg.includes('image')) {
-                        errorMsg = '当前模型可能不支持图片识别(Vision)，请切换模型。';
-                    }
-                } catch (e) {
-                    const text = await response.text();
-                    if(text) errorMsg = text.slice(0, 100);
-                }
-                throw new Error(errorMsg);
-            }
-
-            const data = await safeResponseJson(response);
-            const choice = data.choices?.[0];
-
-            if (choice?.finish_reason === 'content_filter') {
-                throw new Error('AI 拒绝回复 (图片可能包含敏感内容)');
-            }
-
-            let reviewText = choice?.message?.content;
-            if (!reviewText && choice?.message?.reasoning_content) {
-                reviewText = choice.message.reasoning_content;
-            }
-            if (!reviewText && choice?.text) reviewText = choice.text;
-            if (!reviewText && choice?.delta?.content) reviewText = choice.delta.content;
+            let reviewText = result.content?.trim();
 
             if (!reviewText) {
-                const debugStr = JSON.stringify(choice || data);
-                console.warn('AI Empty Response Structure:', data);
+                const debugStr = JSON.stringify(result);
+                console.warn('Agent Empty Response Structure:', result);
                 throw new Error(`AI 返回内容为空. Raw: ${debugStr.substring(0, 100)}...`);
             }
 

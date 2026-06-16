@@ -311,8 +311,7 @@ function getInstantTotalMessages(message: ActiveMsg2InboxMessage): number {
 function toChatCompletionsUrl(baseUrl?: string): string {
   const trimmed = (baseUrl || '').trim();
   if (!trimmed) return 'instant-push';
-  if (/\/chat\/completions\/?$/i.test(trimmed)) return trimmed;
-  return `${trimmed.replace(/\/+$/, '')}/chat/completions`;
+  return 'claude-agent-sdk-disabled';
 }
 
 async function logInstantPushLlmExchange(message: ActiveMsg2InboxMessage): Promise<void> {

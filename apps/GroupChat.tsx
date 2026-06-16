@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useLayoutEffect, useMemo } from 're
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { Message, GroupProfile, CharacterProfile, MessageType, ChatTheme, MemoryFragment, EmojiCategory } from '../types';
-import { safeResponseJson } from '../utils/safeApi';
+import { sendAgentMessage, sendAgentText } from '../utils/agentClient';
 import Modal from '../components/os/Modal';
 import { ContextBuilder } from '../utils/context';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
@@ -177,7 +177,7 @@ const GroupMessageItem = React.memo(({
 // --- Main Component ---
 
 const GroupChat: React.FC = () => {
-    const { closeApp, groups, createGroup, deleteGroup, characters, updateCharacter, apiConfig, addToast, userProfile, virtualTime } = useOS();
+    const { closeApp, groups, createGroup, deleteGroup, characters, updateCharacter, agentRuntimeConfig, addToast, userProfile, virtualTime } = useOS();
     const [view, setView] = useState<'list' | 'chat'>('list');
     const [activeGroup, setActiveGroup] = useState<GroupProfile | null>(null);
     const [messages, setMessages] = useState<Message[]>([]);
@@ -503,8 +503,8 @@ const GroupChat: React.FC = () => {
     // --- Logic: Group Summary & Distribution ---
 
     const handleGroupSummary = async () => {
-        if (!activeGroup || !apiConfig.apiKey) {
-            addToast('请检查配置', 'error');
+        if (!activeGroup || !agentRuntimeConfig.agentServerUrl?.trim()) {
+            addToast('请先配置 Agent Server URL', 'error');
             return;
         }
 
@@ -572,19 +572,21 @@ ${logText.substring(0, 10000)}
 `;
                 }
 
-                const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                    body: JSON.stringify({
-                        model: apiConfig.model,
-                        messages: [{ role: "user", content: prompt }],
-                        temperature: 0.3
-                    })
+                const contentRaw = await sendAgentText(agentRuntimeConfig, {
+                    userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                    charId: `${activeGroup.id}-group-summary`,
+                    conversationId: `${activeGroup.id}-group-summary`,
+                    prompt,
+                    systemPrompt: '你是 SullyOS 的群聊归档摘要器。只输出摘要内容或 YAML，不要解释任务。',
+                    appName: '群聊',
+                    purpose: '群聊归档',
+                    userName: userProfile.name,
+                    temperature: 0.3,
+                    maxTurns: 1,
+                    permissionPreset: 'chat-only',
                 });
-
-                if (response.ok) {
-                    const data = await safeResponseJson(response);
-                    let content = data.choices[0].message.content.trim();
+                if (contentRaw) {
+                    let content = contentRaw.trim();
                     // Basic YAML extraction
                     const yamlMatch = content.match(/summary:\s*["']?([\s\S]*?)["']?$/);
                     let summaryText = yamlMatch ? yamlMatch[1] : content.replace(/^summary:\s*/i, '');
@@ -670,7 +672,7 @@ ${logText.substring(0, 10000)}
     // --- Logic: AI Director (The Core Logic) ---
 
     const triggerDirector = async (currentMsgs: Message[]) => {
-        if (!activeGroup || !apiConfig.apiKey) return;
+        if (!activeGroup || !agentRuntimeConfig.agentServerUrl?.trim()) return;
         setIsTyping(true);
 
         try {
@@ -889,34 +891,41 @@ ${attachedImagesNote}
                     ...attachedImages.map(img => ({ type: 'image_url', image_url: { url: img.url } })),
                   ]
                 : prompt;
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [{ role: "user", content: userMessageContent }],
-                    temperature: 0.9, // High creativity for banter
-                    max_tokens: 8000
-                })
+            const directorCharId = `${activeGroup.id}-group-director`;
+            const result = await sendAgentMessage(agentRuntimeConfig, {
+                userId: (userProfile as any)?.id || userProfile.name || 'local-user',
+                charId: directorCharId,
+                conversationId: directorCharId,
+                turnId: (globalThis.crypto?.randomUUID?.() || `group-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+                fullMessages: [{ role: 'user', content: userMessageContent }],
+                systemPrompt: '你是 SullyOS 群聊导演。严格按用户提示输出 JSON Array。',
+                cleanedApiMessages: [{ role: 'user', content: userMessageContent }],
+                latestUserMessage: prompt,
+                options: {
+                    model: agentRuntimeConfig.model,
+                    maxTurns: agentRuntimeConfig.maxTurns,
+                    temperature: 0.9,
+                    stream: false,
+                    permissionPreset: 'chat-only',
+                    enabledTools: [],
+                },
+                meta: { appName: '群聊', userName: userProfile.name, purpose: '群聊导演' },
             });
 
-            if (!response.ok) throw new Error('Director Failed');
+            if (!result.content) throw new Error('Director Failed');
 
-            const data = await safeResponseJson(response);
-
-            // Token 统计：从导演响应里读 usage（兼容 OpenAI 兼容接口的标准字段）
-            if (data.usage?.total_tokens) {
-                setLastTokenUsage(data.usage.total_tokens);
+            if (result.usage?.totalTokens) {
+                setLastTokenUsage(result.usage.totalTokens);
                 setTokenBreakdown({
-                    prompt: data.usage.prompt_tokens || 0,
-                    completion: data.usage.completion_tokens || 0,
-                    total: data.usage.total_tokens,
+                    prompt: result.usage.inputTokens || 0,
+                    completion: result.usage.outputTokens || 0,
+                    total: result.usage.totalTokens,
                     msgCount: currentMsgs.length,
-                    pass: 'director',
+                    pass: 'agent-director',
                 });
             }
 
-            let jsonStr = data.choices[0].message.content;
+            let jsonStr = result.content;
             
             jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
             const firstBracket = jsonStr.indexOf('[');
