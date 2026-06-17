@@ -781,11 +781,17 @@ const Settings: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-1 gap-3 mb-4">
-                 <div onClick={() => importInputRef.current?.click()} className="py-4 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 cursor-pointer hover:bg-emerald-50 hover:border-emerald-200">
+                 <label className="relative py-4 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 cursor-pointer hover:bg-emerald-50 hover:border-emerald-200 overflow-hidden">
                     <div className="p-2 bg-emerald-100 rounded-full text-emerald-600"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg></div>
                     <span>导入备份 (.zip / .json)</span>
-                </div>
-                <input type="file" ref={importInputRef} className="hidden" accept=".json,.zip" onChange={handleImport} />
+                    <input
+                        type="file"
+                        ref={importInputRef}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                        accept=".json,.zip,application/json,application/zip,application/x-zip-compressed,application/octet-stream"
+                        onChange={handleImport}
+                    />
+                </label>
             </div>
             
             <p className="text-[10px] text-slate-400 px-1 mb-4 leading-relaxed">
