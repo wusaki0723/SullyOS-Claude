@@ -7,6 +7,7 @@ import { sessionsRouter } from './routes/sessions.js';
 import { emotionRouter } from './routes/emotion.js';
 import { tasksRouter } from './routes/tasks.js';
 import { pushRouter } from './routes/push.js';
+import { embeddingsRouter } from './routes/embeddings.js';
 import { errorHandler } from './utils/errors.js';
 import { logger } from './utils/logger.js';
 
@@ -23,6 +24,7 @@ app.use('/api/agent', sessionsRouter);
 app.use('/api/agent', emotionRouter);
 app.use('/api/agent', tasksRouter);
 app.use('/api/agent', pushRouter);
+app.use('/api/agent', embeddingsRouter);
 app.use(errorHandler);
 
 app.listen(config.port, config.host, () => {

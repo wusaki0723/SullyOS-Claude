@@ -24,6 +24,37 @@ const StatusBar: React.FC = () => {
   // Format numbers to have leading zeros
   const format = (n: number) => n.toString().padStart(2, '0');
 
+  const copySystemLogs = async () => {
+    const text = JSON.stringify(systemLogs, null, 2);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch {
+      // Installed PWAs can reject Clipboard API even when normal Chrome allows it.
+    }
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      if (copied) return;
+    } catch {
+      // Fall through to manual copy prompt.
+    }
+
+    window.prompt('复制失败，长按选择下面内容手动复制：', text);
+  };
+
   // Use content color from theme
   const textColor = theme.contentColor || '#ffffff';
   const acnh = theme.skin === 'animalcrossing'; // 动森彩蛋：电量条用叶绿色
@@ -120,7 +151,7 @@ const StatusBar: React.FC = () => {
           onClose={() => setShowLogModal(false)}
           footer={
               <div className="flex gap-2 w-full">
-                  <button onClick={() => { navigator.clipboard.writeText(JSON.stringify(systemLogs, null, 2)); }} className="flex-1 py-3 bg-slate-100 font-bold rounded-xl text-slate-600">复制 JSON</button>
+                  <button onClick={copySystemLogs} className="flex-1 py-3 bg-slate-100 font-bold rounded-xl text-slate-600">复制 JSON</button>
                   <button onClick={clearLogs} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-xl shadow-lg shadow-red-200">清空日志</button>
               </div>
           }

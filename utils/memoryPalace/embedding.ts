@@ -7,6 +7,23 @@
 
 import type { EmbeddingConfig } from './types';
 
+function getAgentEmbeddingProxy(): { url: string; token?: string } | null {
+    try {
+        if (typeof localStorage === 'undefined') return null;
+        const raw = localStorage.getItem('sully_agent_runtime_config');
+        if (!raw) return null;
+        const cfg = JSON.parse(raw);
+        const base = String(cfg?.agentServerUrl || '').trim().replace(/\/+$/, '');
+        if (!base) return null;
+        return {
+            url: `${base}/api/agent/embeddings`,
+            token: typeof cfg?.clientToken === 'string' ? cfg.clientToken.trim() : undefined,
+        };
+    } catch {
+        return null;
+    }
+}
+
 // ─── 核心 API 调用 ────────────────────────────────────
 
 /**
@@ -75,9 +92,11 @@ async function callEmbeddingAPI(
     // 自动修正常见 URL 错误
     let baseUrl = config.baseUrl.replace(/\/+$/, '');
     baseUrl = baseUrl.replace('ai.siliconflow.cn', 'api.siliconflow.cn');
-    const url = `${baseUrl}/embeddings`;
+    const proxy = getAgentEmbeddingProxy();
+    const url = proxy?.url || `${baseUrl}/embeddings`;
 
     const body: Record<string, unknown> = {
+        ...(proxy ? { baseUrl, apiKey: config.apiKey } : {}),
         model: config.model,
         input,
         encoding_format: 'float',
@@ -92,7 +111,7 @@ async function callEmbeddingAPI(
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`,
+                ...(proxy?.token ? { 'Authorization': `Bearer ${proxy.token}` } : { 'Authorization': `Bearer ${config.apiKey}` }),
             },
             body: JSON.stringify(body),
         });
