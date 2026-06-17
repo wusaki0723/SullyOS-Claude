@@ -1,11 +1,12 @@
 {
   "short_name": "SullyOS",
   "name": "SullyOS",
+  "id": "/",
   "display": "standalone",
   "theme_color": "#0f1115",
   "background_color": "#0f1115",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "/",
+  "scope": "/",
   "icons": [
     {
       "src": "./icons/icon-192.png",

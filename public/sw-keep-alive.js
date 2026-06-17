@@ -1758,6 +1758,13 @@ sw.addEventListener("message", (event) => {
       break;
   }
 });
+// Chrome installability still expects the app to be controlled by a service
+// worker with a fetch handler. Keep this network-first and navigation-only so
+// Vite dev proxy, API calls, and asset caching stay untouched.
+sw.addEventListener("fetch", (event) => {
+  if (event.request.mode !== "navigate") return;
+  event.respondWith(fetch(event.request));
+});
 sw.addEventListener("install", () => {
   void sw.skipWaiting();
 });
