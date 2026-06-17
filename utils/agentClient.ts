@@ -1,5 +1,6 @@
 import { safeFetchJson } from './safeApi';
 import { KeepAlive } from './keepAlive';
+import { recordApiCall } from './apiCallLog';
 import { bytesToB64u, isDeadPushEndpoint, SUBSCRIBE_SETTLE_MS, subscribeWithRetry } from './pushSubscribeShared';
 import type { AgentMessage, AgentMessageRequest, AgentMessageResponse, AgentPermissionPreset, AgentPushStatus, AgentRuntimeConfig, AgentTaskRecord } from '../types/agentRuntime';
 
@@ -17,6 +18,15 @@ function authHeaders(config: AgentRuntimeConfig): HeadersInit {
   return headers;
 }
 
+function agentCallMeta(req: AgentMessageRequest, purposeFallback: string) {
+  return {
+    appName: req.meta?.appName || '消息',
+    charId: req.charId,
+    charName: req.meta?.charName,
+    purpose: req.meta?.purpose || purposeFallback,
+  };
+}
+
 export async function sendAgentMessage(
   config: AgentRuntimeConfig,
   req: AgentMessageRequest,
@@ -26,11 +36,35 @@ export async function sendAgentMessage(
   }
 
   if (config.backgroundTasks || config.pushNotifications) {
-    const task = await createAgentTask(config, req);
-    rememberPendingAgentTask(task, req);
-    const result = await waitForAgentTask(config, task.taskId);
-    forgetPendingAgentTask(task.taskId);
-    return result;
+    const startedAt = Date.now();
+    const taskUrl = `${baseUrl(config)}/api/agent/tasks`;
+    let task: AgentTaskRecord | null = null;
+    try {
+      task = await createAgentTask(config, req);
+      rememberPendingAgentTask(task, req);
+      const result = await waitForAgentTask(config, task.taskId);
+      forgetPendingAgentTask(task.taskId);
+      recordApiCall({
+        url: taskUrl,
+        body: req,
+        status: 200,
+        ok: true,
+        response: result,
+        meta: agentCallMeta(req, 'Claude Agent 后台任务'),
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (error) {
+      recordApiCall({
+        url: taskUrl,
+        body: req,
+        ok: false,
+        response: error instanceof Error ? { error: { message: error.message } } : undefined,
+        meta: agentCallMeta(req, 'Claude Agent 后台任务'),
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
   }
 
   const data = await safeFetchJson(`${baseUrl(config)}/api/agent/message`, {
@@ -38,10 +72,7 @@ export async function sendAgentMessage(
     headers: authHeaders(config),
     body: JSON.stringify(req),
   }, 1, 0, {
-    appName: req.meta?.appName || '消息',
-    charId: req.charId,
-    charName: req.meta?.charName,
-    purpose: req.meta?.purpose || 'Claude Agent 回复',
+    ...agentCallMeta(req, 'Claude Agent 回复'),
   });
 
   if (!data?.ok) {

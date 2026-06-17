@@ -3,9 +3,10 @@
  *
  * 设计：项目里 LLM 调用分两类——走 `utils/safeApi.ts` 的 `safeFetchJson` 的，和
  * 各 App 自己写的裸 `fetch`（TRPG / 自习室 / 群聊 / 日记…）。为了一个都不漏，记录点
- * 放在 `OSContext` 里那个全局 `fetch` monkey-patch 上：所有 `/agent-disabled`
- * 和 Claude Agent Edition 的 `/api/agent/message`
- * （含 safeFetchJson 内部 fetch）都经过它，统一调 `recordApiCall`，不重复计。
+ * 放在 `OSContext` 里那个全局 `fetch` monkey-patch 上：同步 Claude Agent
+ * 调用 `/api/agent/message`（含 safeFetchJson 内部 fetch）会经过它。后台任务
+ * `/api/agent/tasks` 在任务完成时由 agentClient 手动写入一条最终记录，避免把轮询
+ * 请求刷进列表。
  *
  * 「时间 / 哪个 API / 哪个模型 / token」从请求体 + 响应里自动解析；「哪个 App / 哪个
  * 角色 / 具体用途」靠两条来源：
@@ -82,7 +83,8 @@ function stripTrailingSlash(s: string): string {
 function deriveBaseUrl(url: string): string {
     return stripTrailingSlash(url
         .replace(/\/chat\/completions\/?$/i, '')
-        .replace(/\/api\/agent\/message\/?$/i, ''));
+        .replace(/\/api\/agent\/message\/?$/i, '')
+        .replace(/\/api\/agent\/tasks(?:\/[^/?#]+)?\/?$/i, ''));
 }
 
 function hostOf(url: string): string {

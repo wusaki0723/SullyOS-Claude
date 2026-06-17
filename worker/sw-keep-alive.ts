@@ -64,8 +64,10 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *              错误，前台据此把超时文案精确化。
  *  - 1.15.1: 临时加 instant push trace，定位 iOS PWA 后台导致的 SSE Load failed / backup push
  *            / SW inbox 落库时序。
+ *  - 1.15.2: notificationclick 保留 agentTaskId，并加 navigation-only fetch handler 让
+ *           Chrome/Android 判定为可安装 PWA。fetch handler 只处理导航，不碰 API / 静态资源。
  */
-const SW_VERSION = '1.15.1';
+const SW_VERSION = '1.15.2';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;
@@ -650,6 +652,7 @@ async function saveIncomingActiveMessage(payload: any) {
 sw.addEventListener('notificationclick', (event: NotificationEvent) => {
   const payload = event.notification.data?.payload || event.notification.data || {};
   const charId = payload?.metadata?.charId || payload?.charId || '';
+  const agentTaskId = payload?.metadata?.taskId || payload?.taskId || '';
   event.notification.close();
 
   event.waitUntil((async () => {
@@ -657,13 +660,14 @@ sw.addEventListener('notificationclick', (event: NotificationEvent) => {
     if (clients.length > 0) {
       const client = clients[0];
       await client.focus();
-      client.postMessage({ type: 'active-msg-open', charId });
+      client.postMessage({ type: 'active-msg-open', charId, agentTaskId });
       return;
     }
 
     const openUrl = new URL(sw.registration.scope || sw.location.origin);
     openUrl.searchParams.set('openApp', 'chat');
     if (charId) openUrl.searchParams.set('activeMsgCharId', charId);
+    if (agentTaskId) openUrl.searchParams.set('agentTaskId', agentTaskId);
     await sw.clients.openWindow(openUrl.toString());
   })());
 });
@@ -699,6 +703,14 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       syncProactive(event.data.configs || []);
       break;
   }
+});
+
+// Chrome installability expects the app to be controlled by a service worker
+// with a fetch handler. Keep this navigation-only so Vite proxy, API calls, and
+// asset loading remain untouched.
+sw.addEventListener('fetch', (event: FetchEvent) => {
+  if (event.request.mode !== 'navigate') return;
+  event.respondWith(fetch(event.request));
 });
 
 sw.addEventListener('install', () => {

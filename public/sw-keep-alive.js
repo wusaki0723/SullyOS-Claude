@@ -1281,7 +1281,7 @@ async function removeQueuedRequest(id) {
 }
 
 // worker/sw-keep-alive.ts
-var SW_VERSION = "1.15.1";
+var SW_VERSION = "1.15.2";
 var PING_INTERVAL = 15e3;
 var MAX_MANUAL_ALIVE_MS = 5 * 6e4;
 var ACTIVE_MSG_DB_NAME = "ActiveMsg";
@@ -1758,9 +1758,6 @@ sw.addEventListener("message", (event) => {
       break;
   }
 });
-// Chrome installability still expects the app to be controlled by a service
-// worker with a fetch handler. Keep this network-first and navigation-only so
-// Vite dev proxy, API calls, and asset caching stay untouched.
 sw.addEventListener("fetch", (event) => {
   if (event.request.mode !== "navigate") return;
   event.respondWith(fetch(event.request));

@@ -30,6 +30,7 @@ import { synthesizeSpeechDetailed, cleanTextForTts, parseVoiceOutput } from '../
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { isInstantConfigReady, loadInstantConfig } from '../utils/instantPushClient';
 import { forgetPendingAgentTask, getAgentTask, getPendingAgentTasks, resetAgentSession, sendAgentMessage } from '../utils/agentClient';
+import { recordApiCall } from '../utils/apiCallLog';
 
 type InstantToolUiStatus = {
     charId: string;
@@ -154,6 +155,26 @@ const Chat: React.FC = () => {
                     const task = await getAgentTask(agentRuntimeConfig, item.taskId);
                     if (cancelled) return;
                     if (task.status === 'completed' && task.response?.content) {
+                        recordApiCall({
+                            url: `${agentRuntimeConfig.agentServerUrl.replace(/\/+$/, '')}/api/agent/tasks`,
+                            body: {
+                                userId,
+                                charId: char.id,
+                                conversationId: item.conversationId,
+                                turnId: item.turnId,
+                                options: { model: agentRuntimeConfig.model },
+                            },
+                            status: 200,
+                            ok: true,
+                            response: task.response,
+                            meta: {
+                                appName: '消息',
+                                charId: char.id,
+                                charName: char.name,
+                                purpose: 'Claude Agent 后台任务恢复',
+                            },
+                            durationMs: task.completedAt && task.createdAt ? Math.max(0, task.completedAt - task.createdAt) : undefined,
+                        });
                         await DB.saveMessage({
                             charId: char.id,
                             role: 'assistant',
@@ -176,6 +197,25 @@ const Chat: React.FC = () => {
                         forgetPendingAgentTask(item.taskId);
                         restored += 1;
                     } else if (task.status === 'failed') {
+                        recordApiCall({
+                            url: `${agentRuntimeConfig.agentServerUrl.replace(/\/+$/, '')}/api/agent/tasks`,
+                            body: {
+                                userId,
+                                charId: char.id,
+                                conversationId: item.conversationId,
+                                turnId: item.turnId,
+                                options: { model: agentRuntimeConfig.model },
+                            },
+                            ok: false,
+                            response: { error: task.error },
+                            meta: {
+                                appName: '消息',
+                                charId: char.id,
+                                charName: char.name,
+                                purpose: 'Claude Agent 后台任务恢复',
+                            },
+                            durationMs: task.completedAt && task.createdAt ? Math.max(0, task.completedAt - task.createdAt) : undefined,
+                        });
                         await DB.saveMessage({
                             charId: char.id,
                             role: 'system',
@@ -196,7 +236,7 @@ const Chat: React.FC = () => {
         };
         void recover();
         return () => { cancelled = true; };
-    }, [char?.id, agentRuntimeConfig.agentServerUrl, agentRuntimeConfig.clientToken, userProfile.name]);
+    }, [char?.id, agentRuntimeConfig.agentServerUrl, agentRuntimeConfig.clientToken, agentRuntimeConfig.model, userProfile.name]);
 
     const activeTheme = useMemo(() => {
         const fallback = PRESET_THEMES.default;
