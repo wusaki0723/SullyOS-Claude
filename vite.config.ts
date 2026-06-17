@@ -42,6 +42,45 @@ let showBuildBadge = !isReleaseBranch;
 if (process.env.VITE_HIDE_BUILD_BADGE === '1') showBuildBadge = false;
 if (process.env.VITE_SHOW_BUILD_BADGE === '1') showBuildBadge = true;
 
+const proxy = {
+  '/api/agent': {
+    target: 'http://127.0.0.1:8787',
+    changeOrigin: true,
+    secure: false,
+  },
+  '/api/minimax/t2a': {
+    target: 'https://api.minimaxi.com',
+    changeOrigin: true,
+    secure: true,
+    rewrite: () => '/v1/t2a_v2',
+    // Route to 国服 / 海外 based on X-MiniMax-Region header sent by the client.
+    router: (req) => {
+      const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
+      return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
+    },
+  },
+  '/api/minimax/get-voice': {
+    target: 'https://api.minimaxi.com',
+    changeOrigin: true,
+    secure: true,
+    rewrite: () => '/v1/get_voice',
+    router: (req) => {
+      const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
+      return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
+    },
+  },
+  '/api/minimax/music': {
+    target: 'https://api.minimaxi.com',
+    changeOrigin: true,
+    secure: true,
+    rewrite: () => '/v1/music_generation',
+    router: (req) => {
+      const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
+      return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
+    },
+  },
+};
+
 export default defineConfig({
   plugins: [
     react(),
@@ -65,44 +104,14 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['desktop.saki0723.fun'],
-    proxy: {
-      '/api/agent': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-        secure: false,
-      },
-      '/api/minimax/t2a': {
-        target: 'https://api.minimaxi.com',
-        changeOrigin: true,
-        secure: true,
-        rewrite: () => '/v1/t2a_v2',
-        // Route to 国服 / 海外 based on X-MiniMax-Region header sent by the client.
-        router: (req) => {
-          const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
-          return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
-        },
-      },
-      '/api/minimax/get-voice': {
-        target: 'https://api.minimaxi.com',
-        changeOrigin: true,
-        secure: true,
-        rewrite: () => '/v1/get_voice',
-        router: (req) => {
-          const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
-          return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
-        },
-      },
-      '/api/minimax/music': {
-        target: 'https://api.minimaxi.com',
-        changeOrigin: true,
-        secure: true,
-        rewrite: () => '/v1/music_generation',
-        router: (req) => {
-          const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
-          return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
-        },
-      },
-    }
+    proxy,
+  },
+  preview: {
+    host: '0.0.0.0',
+    port: 5173,
+    strictPort: true,
+    allowedHosts: ['desktop.saki0723.fun'],
+    proxy,
   },
   build: {
     outDir: 'dist',
