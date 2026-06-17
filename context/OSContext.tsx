@@ -32,6 +32,10 @@ import { exportMcdLocal } from '../utils/mcdMcpClient';
 
 const LEGACY_CHAT_COMPLETIONS_PATH = '/chat' + '/completions';
 
+function isOptionalNetworkUrl(url: string): boolean {
+    return url.includes('orz.ai/api/v1/dailynews');
+}
+
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
   cleaned = cleaned.replace(/\[(?:(?:你|User|用户|System)\s*)?发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
@@ -857,6 +861,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // Network Failure
               if (urlStr.includes(LEGACY_CHAT_COMPLETIONS_PATH) || urlStr.includes('/api/agent/message')) {
                   recordApiCall({ url: urlStr, body: (config as any)?.body, ok: false, meta: (config as any)?.__sullyMeta, durationMs: Date.now() - fetchStartedAt });
+              }
+              if (isOptionalNetworkUrl(urlStr)) {
+                  throw err;
               }
               setSystemLogs(prev => [{
                   id: `log-${Date.now()}`,
