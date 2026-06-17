@@ -9,6 +9,7 @@ import Modal from '../components/os/Modal';
 import { sendAgentText } from '../utils/agentClient';
 import { normalizeMessageContent } from '../utils/messageFormat';
 import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
+import { createAgentMemoryPalaceLLM } from '../utils/memoryPalace/agentLightLLM';
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { Sparkle, Archive } from '@phosphor-icons/react';
 
@@ -581,12 +582,20 @@ ${charPart}
             let palaceResult: DiaryIngestResult | null = null;
             if (selectedChar.memoryPalaceEnabled) {
                 try {
+                    const agentMemoryLLM = agentRuntimeConfig.agentServerUrl
+                        ? createAgentMemoryPalaceLLM(agentRuntimeConfig, {
+                            userId: (userProfile as any).id || userProfile.name || 'local-user',
+                            charId: selectedChar.id,
+                            charName: selectedChar.name,
+                            userName: userProfile?.name,
+                        })
+                        : null;
                     palaceResult = await ingestDiaryToPalace(
                         selectedChar,
                         diary.date,
                         diary.userPage.text,
                         diary.charPage?.text || '',
-                        memoryPalaceConfig?.lightLLM as any,
+                        (agentMemoryLLM || memoryPalaceConfig?.lightLLM) as any,
                         userProfile.name,
                     );
                 } catch (e: any) {

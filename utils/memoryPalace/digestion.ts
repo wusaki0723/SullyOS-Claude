@@ -16,7 +16,7 @@ import type { LightLLMConfig } from './pipeline';
 import { MemoryNodeDB, AnticipationDB } from './db';
 import { fulfillAnticipation, disappointAnticipation } from './anticipation';
 import { vectorizeAndStore } from './vectorStore';
-import { safeFetchJson } from '../safeApi';
+import { callLightLLMText } from './lightLLM';
 import { safeParseJsonArray } from './jsonUtils';
 
 /** 从 localStorage 读取远程向量配置（与 pipeline.ts 同一份来源） */
@@ -251,29 +251,17 @@ ${material.recentContext.map(n => `- (${n.room}, ${n.mood}): ${n.content}`).join
 没有变化的可以不写。只写有变化的。`;
 
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: '请开始审视。' },
-                    ],
-                    temperature: 0.6,
-                    max_tokens: 8000,
-                    stream: false,
-                }),
+                systemPrompt,
+                userPrompt: '请开始审视。',
+                temperature: 0.6,
+                maxTokens: 8000,
+                purpose: '记忆消化',
             },
-            2, 0, { appName: '记忆宫殿', purpose: '记忆消化' }
+            { appName: '记忆宫殿', purpose: '记忆消化' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
         const parsed = safeParseJsonArray(reply);
 
         const validActions = ['resolve', 'deepen', 'fade', 'fulfill', 'disappoint', 'internalize', 'synthesize_user', 'self_insight', 'self_confuse', 'keep'];
@@ -755,32 +743,18 @@ ${memoryContext}
 
     console.log(`🎭 [PersonalityDetect] ${charName} → 调用 LLM（model=${llmConfig.model}, max_tokens=8000）`);
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply, finishReason, usage } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: '请判断。' },
-                    ],
-                    temperature: 0.3,
-                    // 8000：给 think 型模型留足思考空间，300 会被 reasoning 吃光
-                    max_tokens: 8000,
-                    stream: false,
-                }),
+                systemPrompt,
+                userPrompt: '请判断。',
+                temperature: 0.3,
+                // 8000：给 think 型模型留足思考空间，300 会被 reasoning 吃光
+                maxTokens: 8000,
+                purpose: '人格审视',
             },
-            2, 0, { appName: '记忆宫殿', charName, purpose: '人格审视' }
+            { appName: '记忆宫殿', charName, purpose: '人格审视' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
-        const finishReason = data.choices?.[0]?.finish_reason;
-        const usage = data.usage;
         console.log(`🎭 [PersonalityDetect] ${charName} LLM 原始返回 (finish=${finishReason}, usage=${JSON.stringify(usage || {})}):\n${reply}`);
 
         // 带引号意识的大括号栈扫描：从 reply 里提取所有顶层 {...} 候选

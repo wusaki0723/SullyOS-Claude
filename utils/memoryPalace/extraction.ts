@@ -8,7 +8,7 @@
 import type { Message } from '../../types';
 import type { MemoryNode, MemoryRoom } from './types';
 import type { LightLLMConfig } from './pipeline';
-import { safeFetchJson } from '../safeApi';
+import { callLightLLMText } from './lightLLM';
 import { safeParseJsonArray } from './jsonUtils';
 import { formatMessageForPrompt } from '../messageFormat';
 
@@ -412,31 +412,19 @@ pinDays 仅在需要置顶时才写，大多数记忆不需要。
 如果对话过于琐碎无值得记忆的内容，返回空数组 []。`;
 
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: `对话内容：\n${conversationText}` },
-                    ],
-                    temperature: 0.4,
-                    // 12000 比 16000 留余量：避免 LLM 顶满 cap 导致 JSON 输出被 truncate
-                    // buffer 路径 pipeline 上层 CHUNK_SIZE=250 已经在切分 → 单 call 输出可控
-                    max_tokens: 12000,
-                    stream: false,
-                }),
+                systemPrompt,
+                userPrompt: `对话内容：\n${conversationText}`,
+                temperature: 0.4,
+                // 12000 比 16000 留余量：避免 LLM 顶满 cap 导致 JSON 输出被 truncate
+                // buffer 路径 pipeline 上层 CHUNK_SIZE=250 已经在切分 → 单 call 输出可控
+                maxTokens: 12000,
+                purpose: '记忆提取',
             },
-            2, 0, { appName: '记忆宫殿', purpose: '记忆提取' }
+            { appName: '记忆宫殿', purpose: '记忆提取' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
         const parsed = safeParseJsonArray(reply);
 
         if (parsed.length === 0 && reply.trim().length > 0) {

@@ -9,7 +9,7 @@
 import type { MemoryNode, MemoryLink, LinkType } from './types';
 import type { LightLLMConfig } from './pipeline';
 import { MemoryLinkDB } from './db';
-import { safeFetchJson } from '../safeApi';
+import { callLightLLMText } from './lightLLM';
 import { safeParseJsonArray } from './jsonUtils';
 import { getEmotionVA, emotionDistance } from './emotionSpace';
 
@@ -75,29 +75,17 @@ strength 范围 0.3-0.8。没有关联返回 []。只输出 JSON。`;
     const userMsg = `新记忆：\n${newList}\n\n旧记忆：\n${oldList}`;
 
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: prompt },
-                        { role: 'user', content: userMsg },
-                    ],
-                    temperature: 0.2,
-                    max_tokens: 800,
-                    stream: false,
-                }),
+                systemPrompt: prompt,
+                userPrompt: userMsg,
+                temperature: 0.2,
+                maxTokens: 800,
+                purpose: '记忆关联',
             },
-            2, 0, { appName: '记忆宫殿', purpose: '记忆关联' }
+            { appName: '记忆宫殿', purpose: '记忆关联' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
         const parsed = safeParseJsonArray(reply);
         const validTypes: LinkType[] = ['causal', 'person', 'metaphor'];
 

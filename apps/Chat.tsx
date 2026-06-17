@@ -31,6 +31,7 @@ import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { isInstantConfigReady, loadInstantConfig } from '../utils/instantPushClient';
 import { forgetPendingAgentTask, getAgentTask, getPendingAgentTasks, resetAgentSession, sendAgentMessage } from '../utils/agentClient';
 import { recordApiCall } from '../utils/apiCallLog';
+import { createAgentMemoryPalaceLLM } from '../utils/memoryPalace/agentLightLLM';
 
 type InstantToolUiStatus = {
     charId: string;
@@ -1591,9 +1592,17 @@ const Chat: React.FC = () => {
     const handleForceVectorize = async () => {
         if (!char || !char.memoryPalaceEnabled || isVectorizing) return;
         const mpEmb = memoryPalaceConfig?.embedding;
-        const mpLLM = memoryPalaceConfig?.lightLLM;
+        const agentMemoryLLM = agentRuntimeConfig.agentServerUrl
+            ? createAgentMemoryPalaceLLM(agentRuntimeConfig, {
+                userId: (userProfile as any).id || userProfile.name || 'local-user',
+                charId: char.id,
+                charName: char.name,
+                userName: userProfile?.name,
+            })
+            : null;
+        const mpLLM = agentMemoryLLM || memoryPalaceConfig?.lightLLM;
         if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM?.baseUrl) {
-            addToast('请先在记忆宫殿设置中配置 API', 'error');
+            addToast('请先配置 Agent Server 和记忆宫殿 Embedding API', 'error');
             return;
         }
 

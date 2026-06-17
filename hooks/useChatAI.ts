@@ -10,6 +10,7 @@ import { ContextBuilder } from '../utils/context';
 import { useMusic, loadMusicHooks } from '../context/MusicContext';
 import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion, detectPersonalityStyle } from '../utils/memoryPalace';
+import { createAgentMemoryPalaceLLM } from '../utils/memoryPalace/agentLightLLM';
 // evolveFlowNarrative 保留为低频深刷新备用，日常意识流由副 API 的情绪评估同轮产出（innerState 字段）
 // import { evolveFlowNarrative } from '../utils/scheduleGenerator';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
@@ -808,13 +809,22 @@ export const useChatAI = ({
             setXhsStatus('');
 
             // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）。
-            // Claude Agent Edition 不再回退主聊天运行时；lightLLM / embedding
-            // 必须作为记忆宫殿的独立服务显式配置，避免主路径偷偷走旧 provider。
+            // Claude Agent Edition: 记忆提取这类文本副任务优先走 Agent Server，
+            // 并使用独立的 __memory_palace session，避免污染主聊天 session。
+            // embedding 仍然必须是独立向量服务，Claude Agent SDK 不提供 embedding。
             const mpEmb = memoryPalaceConfig?.embedding;
             const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-            const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : null;
             // 读 ref 拿到最新的 char 状态；同 id 才信任，否则保守跳过（用户已经切角色了）
             const liveChar = charRef.current?.id === char.id ? charRef.current : null;
+            const agentMemoryLLM = agentRuntimeConfig.agentServerUrl
+                ? createAgentMemoryPalaceLLM(agentRuntimeConfig, {
+                    userId: (userProfile as any).id || userProfile.name || 'local-user',
+                    charId: char.id,
+                    charName: char.name,
+                    userName: userProfile?.name,
+                })
+                : null;
+            const mpLLM = agentMemoryLLM || (mpLLMConfigured?.baseUrl ? mpLLMConfigured : null);
             if (liveChar?.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM?.baseUrl) {
                 const charName = char.name;
                 // 不再预置"正在回味"状态：pipeline 会在水位线未到时立刻 skip，

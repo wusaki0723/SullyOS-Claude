@@ -26,7 +26,8 @@ import { EventBoxDB, MemoryNodeDB } from './db';
 import type { LightLLMConfig } from './pipeline';
 import { vectorizeAndStore } from './vectorStore';
 import { bulkSetArchived } from './supabaseVector';
-import { safeFetchJson, extractJson } from '../safeApi';
+import { extractJson } from '../safeApi';
+import { callLightLLMText } from './lightLLM';
 
 const VALID_ROOMS: MemoryRoom[] = [
     'living_room', 'bedroom', 'study', 'user_room',
@@ -173,29 +174,17 @@ async function callCompressionLLM(
     const userMsg = `${oldSummaryBlock}\n${livesText}`;
 
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: userMsg },
-                    ],
-                    temperature: 0.5,
-                    max_tokens: 8000,
-                    stream: false,
-                }),
+                systemPrompt,
+                userPrompt: userMsg,
+                temperature: 0.5,
+                maxTokens: 8000,
+                purpose: '事件压缩',
             },
-            2, 0, { appName: '记忆宫殿', purpose: '事件压缩' }
+            { appName: '记忆宫殿', purpose: '事件压缩' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
         let parsed: any = extractJson(reply);
         const parseFailed = !parsed || typeof parsed !== 'object';
         const contentMissing = !parseFailed && (!parsed.content || typeof parsed.content !== 'string');

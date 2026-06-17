@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
+import type { CharacterProfile } from '../types';
 import {
     MemoryRoom, MemoryNode, ROOM_CONFIGS, ROOM_LABELS, getRoomLabel,
     MemoryNodeDB, AnticipationDB, MemoryLinkDB, EventBoxDB,
@@ -11,6 +12,8 @@ import {
     exportMemoryPalace, importMemoryPalace, isMemoryPalaceExportFile,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox } from '../utils/memoryPalace';
+import { createAgentMemoryPalaceLLM } from '../utils/memoryPalace/agentLightLLM';
+import { callLightLLMText } from '../utils/memoryPalace/lightLLM';
 
 /** UI 内部类型：统一描述"关联"来源（EventBox 兄弟 or 旧 MemoryLink） */
 type LinkedMemoryUI = {
@@ -402,7 +405,7 @@ const labelClass = "text-[10px] font-bold text-slate-400 uppercase tracking-wide
 // ─── 主组件 ───────────────────────────────────────────
 
 export default function MemoryPalaceApp() {
-    const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig } = useOS();
+    const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, agentRuntimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast } = useOS();
     const char = characters.find(c => c.id === activeCharacterId);
 
     const [view, setView] = useState<'picker' | 'palace' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>('picker');
@@ -567,6 +570,17 @@ export default function MemoryPalaceApp() {
     // 抽出原始字段作为 useEffect 依赖，避免 memoryPalaceConfig 对象新引用触发重跑
     const lightLLMBaseUrl = memoryPalaceConfig.lightLLM?.baseUrl || '';
     const lightLLMApiKey = memoryPalaceConfig.lightLLM?.apiKey || '';
+    const getMemoryPalaceLLMFor = useCallback((target: CharacterProfile) => {
+        if (agentRuntimeConfig.agentServerUrl) {
+            return createAgentMemoryPalaceLLM(agentRuntimeConfig, {
+                userId: (userProfile as any).id || userProfile.name || 'local-user',
+                charId: target.id,
+                charName: target.name,
+                userName: userProfile?.name,
+            });
+        }
+        return (lightLLMBaseUrl && lightLLMApiKey) ? memoryPalaceConfig.lightLLM : null;
+    }, [agentRuntimeConfig, userProfile, lightLLMBaseUrl, lightLLMApiKey, memoryPalaceConfig.lightLLM]);
 
     // 切换角色时清掉上一个角色遗留的待确认结果
     useEffect(() => {
@@ -584,7 +598,8 @@ export default function MemoryPalaceApp() {
         // 已经尝试过或已确认过，不再重复检测（避免 LLM 偶发重置人格）
         const skipKey = `mp_personality_tried_${char.id}`;
         if (localStorage.getItem(skipKey)) return;
-        if (!lightLLMBaseUrl || !lightLLMApiKey) return;
+        const llm = getMemoryPalaceLLMFor(char);
+        if (!llm) return;
 
         // 切换角色时，丢弃旧角色尚未返回的检测结果，避免把 A 的人格应用到 B
         let cancelled = false;
@@ -592,7 +607,7 @@ export default function MemoryPalaceApp() {
 
         setDetectingPersonality(true);
         const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
-        detectPersonalityStyle(detectingCharId, char.name, persona, memoryPalaceConfig.lightLLM)
+        detectPersonalityStyle(detectingCharId, char.name, persona, llm)
             .then(result => {
                 if (cancelled) return;
                 setPendingPersonality(result);
@@ -610,20 +625,16 @@ export default function MemoryPalaceApp() {
 
         return () => { cancelled = true; };
         // 依赖用原始字符串字段，避免 memoryPalaceConfig 对象每次新引用都重跑
-    }, [char?.id, (char as any)?.personalityStyle, view, lightLLMBaseUrl, lightLLMApiKey]);
+    }, [char?.id, (char as any)?.personalityStyle, view, getMemoryPalaceLLMFor]);
 
     // 手动触发 AI 评估（认知参数设置区的按钮）。和自动检测共用 detecting/pending
-    // 两个状态，所以结果同样走"分析中 → 确认"两屏流程。副 API 没配时退回主
-    // apiConfig —— 跟 useChatAI 里 mpLLM 的 fallback 策略一致。
+    // 两个状态，所以结果同样走"分析中 → 确认"两屏流程。Claude 版优先使用
+    // Agent Server 的记忆宫殿隔离 session，未配置 Agent 时才使用旧 lightLLM。
     const manualDetectPersonality = () => {
         if (!char || detectingPersonality) return;
-        const llm = (lightLLMBaseUrl && lightLLMApiKey)
-            ? memoryPalaceConfig.lightLLM
-            : (apiConfig?.baseUrl && apiConfig?.apiKey
-                ? { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model }
-                : null);
+        const llm = getMemoryPalaceLLMFor(char);
         if (!llm) {
-            addToast('请先配置副 API（记忆宫殿全局设置）或主 API', 'error');
+            addToast('请先配置 Agent Server，或在记忆宫殿全局设置中配置 lightLLM', 'error');
             return;
         }
         const detectingCharId = char.id;
@@ -644,6 +655,7 @@ export default function MemoryPalaceApp() {
     // 判断是否已配置（使用全局配置）
     const hasEmbeddingConfig = !!(memoryPalaceConfig.embedding.baseUrl && memoryPalaceConfig.embedding.apiKey);
     const hasLightApi = !!(memoryPalaceConfig.lightLLM.baseUrl && memoryPalaceConfig.lightLLM.apiKey);
+    const hasAgentMemoryLLM = !!agentRuntimeConfig.agentServerUrl;
 
     // 加载数据
     const loadStats = useCallback(async () => {
@@ -1029,9 +1041,9 @@ export default function MemoryPalaceApp() {
             return;
         }
         const mpEmb = memoryPalaceConfig?.embedding;
-        const mpLLM = memoryPalaceConfig?.lightLLM;
-        if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM?.baseUrl || !mpLLM?.apiKey) {
-            addToast('请先在记忆宫殿设置中配置 Embedding + 副 API', 'error');
+        const mpLLM = getMemoryPalaceLLMFor(target);
+        if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM?.baseUrl) {
+            addToast('请先配置记忆宫殿 Embedding API，并配置 Agent Server 或 lightLLM', 'error');
             return;
         }
 
@@ -1216,9 +1228,9 @@ export default function MemoryPalaceApp() {
             return;
         }
 
-        const lightApi = memoryPalaceConfig.lightLLM;
+        const lightApi = getMemoryPalaceLLMFor(char);
         if (!lightApi?.baseUrl) {
-            setMigrationResult('[err]需要配置副 API（轻量副模型），用于 LLM 记忆提取');
+            setMigrationResult('[err]需要配置 Agent Server 或 lightLLM，用于 LLM 记忆提取');
             return;
         }
 
@@ -1255,9 +1267,9 @@ export default function MemoryPalaceApp() {
 
     const handleDigest = async () => {
         if (!char || digesting) return;
-        const lightApi = memoryPalaceConfig.lightLLM;
+        const lightApi = getMemoryPalaceLLMFor(char);
         if (!lightApi?.baseUrl) {
-            setDigestResult('[err]请先在设置中配置副 API');
+            setDigestResult('[err]请先配置 Agent Server 或 lightLLM');
             return;
         }
 
@@ -2408,43 +2420,39 @@ export default function MemoryPalaceApp() {
                     {/* 测试副 API 连接 */}
                     <button
                         onClick={async () => {
-                            if (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim()) return;
+                            if (!hasAgentMemoryLLM && (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim())) return;
                             setTestingLight(true);
                             setLightTestResult(null);
                             try {
-                                const res = await fetch(`${lightUrl.trim().replace(/\/+$/, '')}/agent-disabled`, {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json',
-                                        'Authorization': `Bearer ${lightKey.trim()}`,
+                                const llm = hasAgentMemoryLLM && char
+                                    ? getMemoryPalaceLLMFor(char)
+                                    : { baseUrl: lightUrl.trim(), apiKey: lightKey.trim(), model: lightModel.trim() };
+                                if (!llm) throw new Error('Agent Server 或 lightLLM 未配置');
+                                const { reply } = await callLightLLMText(
+                                    llm,
+                                    {
+                                        systemPrompt: '你是 SullyOS 记忆宫殿的连接测试。只回复 OK。',
+                                        userPrompt: 'Hi',
+                                        temperature: 0,
+                                        maxTokens: 32,
+                                        purpose: '记忆宫殿连接测试',
                                     },
-                                    body: JSON.stringify({
-                                        model: lightModel.trim(),
-                                        messages: [{ role: 'user', content: 'Hi' }],
-                                        max_tokens: 5,
-                                    }),
-                                });
-                                if (res.ok) {
-                                    const data = await res.json();
-                                    const reply = (data.choices?.[0]?.message?.content || '').toString();
-                                    setLightTestResult(`[ok]连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
-                                } else {
-                                    const text = await res.text().catch(() => '');
-                                    setLightTestResult(`[err]HTTP ${res.status}: ${text.slice(0, 120)}`);
-                                }
+                                    { appName: '记忆宫殿', charName: char?.name, purpose: '连接测试' },
+                                );
+                                setLightTestResult(`[ok]连接成功 — 模型回复: "${String(reply || '').slice(0, 30)}"`);
                             } catch (err: any) {
                                 setLightTestResult(`[err]连接失败: ${err?.message || String(err)}`);
                             } finally {
                                 setTestingLight(false);
                             }
                         }}
-                        disabled={testingLight || !lightUrl.trim() || !lightKey.trim() || !lightModel.trim()}
+                        disabled={testingLight || (!hasAgentMemoryLLM && (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim()))}
                         style={{
                             width: '100%', marginTop: 8, padding: '10px 0', borderRadius: 12,
                             border: '1px solid #16a34a44', fontWeight: 600, fontSize: 13,
                             color: '#16a34a', background: 'white',
-                            cursor: (testingLight || !lightUrl.trim() || !lightKey.trim() || !lightModel.trim()) ? 'not-allowed' : 'pointer',
-                            opacity: (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim()) ? 0.5 : 1,
+                            cursor: (testingLight || (!hasAgentMemoryLLM && (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim()))) ? 'not-allowed' : 'pointer',
+                            opacity: (!hasAgentMemoryLLM && (!lightUrl.trim() || !lightKey.trim() || !lightModel.trim())) ? 0.5 : 1,
                         }}
                     >
                         {testingLight ? '测试中...' : (
@@ -2465,10 +2473,10 @@ export default function MemoryPalaceApp() {
                         </div>
                     )}
 
-                    {!hasLightApi && (
+                    {!hasLightApi && !hasAgentMemoryLLM && (
                         <div style={{ marginTop: 8, fontSize: 11, color: '#a16207', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5 }}>
                             <Icon name="warning" size={12} />
-                            <span>副 API 未配置 — 后台处理会<b>回退使用主 API</b>（功能可用，但会占主 API 额度）</span>
+                            <span>未配置 Agent Server 或 lightLLM — 记忆提取/消化会暂停</span>
                         </div>
                     )}
                 </div>

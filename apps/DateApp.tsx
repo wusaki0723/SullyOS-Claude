@@ -8,6 +8,7 @@ import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHi
 import type { PipelineResult } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { sendAgentText } from '../utils/agentClient';
+import { createAgentMemoryPalaceLLM } from '../utils/memoryPalace/agentLightLLM';
 import Modal from '../components/os/Modal';
 import DateSession from '../components/date/DateSession';
 import DateSettings from '../components/date/DateSettings';
@@ -210,7 +211,15 @@ const DateApp: React.FC = () => {
         if (!liveBefore?.memoryPalaceEnabled) return;
         const mpEmb = memoryPalaceConfig?.embedding;
         const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
-        const mpLLM = mpLLMConfigured?.baseUrl ? mpLLMConfigured : null;
+        const agentMemoryLLM = agentRuntimeConfig.agentServerUrl
+            ? createAgentMemoryPalaceLLM(agentRuntimeConfig, {
+                userId: (userProfile as any).id || userProfile.name || 'local-user',
+                charId: charForHook.id,
+                charName: charForHook.name,
+                userName: userProfile?.name,
+            })
+            : null;
+        const mpLLM = agentMemoryLLM || (mpLLMConfigured?.baseUrl ? mpLLMConfigured : null);
         if (!mpEmb?.baseUrl || !mpEmb?.apiKey || !mpLLM?.baseUrl) return;
 
         const recentMsgs = await DB.getRecentMessagesByCharId(charForHook.id, 50);

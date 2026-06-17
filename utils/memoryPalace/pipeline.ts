@@ -84,6 +84,13 @@ export interface LightLLMConfig {
     baseUrl: string;
     apiKey: string;
     model: string;
+    sendText?: (input: {
+        systemPrompt: string;
+        userPrompt: string;
+        temperature?: number;
+        maxTokens?: number;
+        purpose?: string;
+    }) => Promise<string>;
 }
 
 // ─── 日期区间记忆加载 ────────────────────────────────

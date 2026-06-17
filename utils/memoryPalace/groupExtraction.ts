@@ -11,7 +11,7 @@
 import type { Message } from '../../types';
 import type { MemoryRoom } from './types';
 import type { LightLLMConfig } from './pipeline';
-import { safeFetchJson } from '../safeApi';
+import { callLightLLMText } from './lightLLM';
 import { safeParseJsonArray } from './jsonUtils';
 
 /** 群记忆草稿——尚未指派 charId（一份记忆稍后会复制给每个成员持久化） */
@@ -133,29 +133,17 @@ ${buildGroupRulesBlock(groupName, memberNames, userLabel)}
 如果群聊过于琐碎无值得记忆的内容，返回空数组 []。`;
 
     try {
-        const data = await safeFetchJson(
-            `${llmConfig.baseUrl.replace(/\/+$/, '')}/agent-disabled`,
+        const { reply } = await callLightLLMText(
+            llmConfig,
             {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${llmConfig.apiKey}`,
-                },
-                body: JSON.stringify({
-                    model: llmConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: `群聊记录：\n${conversationText}` },
-                    ],
-                    temperature: 0.4,
-                    max_tokens: 12000,
-                    stream: false,
-                }),
+                systemPrompt,
+                userPrompt: `群聊记录：\n${conversationText}`,
+                temperature: 0.4,
+                maxTokens: 12000,
+                purpose: '群记忆提取',
             },
-            2, 0, { appName: '记忆宫殿', purpose: '群记忆提取' }
+            { appName: '记忆宫殿', purpose: '群记忆提取' },
         );
-
-        const reply = data.choices?.[0]?.message?.content || '';
         const parsed = safeParseJsonArray(reply);
 
         if (parsed.length === 0 && reply.trim().length > 0) {
